@@ -1,11 +1,30 @@
-.DS_Store
+# Swift / SPM
 .build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+*.perspectivev3
+DerivedData/
+
+# Build artifacts
+dist/
+*.app/
+*.dmg
+*.zip
 *.o
 *.d
-Package.resolved
-xcuserdata/
-*.xcworkspace/xcuserdata/
-*.xcodeproj/xcuserdata/
-MdReader.xcodeproj/
-MdReader/
-.swiftpm/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo

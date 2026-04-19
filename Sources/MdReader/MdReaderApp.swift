@@ -8,12 +8,12 @@ struct MdReaderApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
-                .frame(minWidth: 800, minHeight: 500)
+                .frame(minWidth: 820, minHeight: 520)
         }
         .windowStyle(.titleBar)
+        .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) { }
-            CommandGroup(after: .newItem) {
+            CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") {
                     appState.openFolderPanel()
                 }
@@ -25,6 +25,14 @@ struct MdReaderApp: App {
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(!appState.isDirty)
+            }
+            CommandMenu("View") {
+                Button("Preview") { appState.viewMode = .preview }
+                    .keyboardShortcut("1", modifiers: [.command])
+                Button("Split") { appState.viewMode = .split }
+                    .keyboardShortcut("2", modifiers: [.command])
+                Button("Edit") { appState.viewMode = .edit }
+                    .keyboardShortcut("3", modifiers: [.command])
             }
         }
     }
