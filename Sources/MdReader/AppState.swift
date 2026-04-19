@@ -20,6 +20,10 @@ final class AppState: ObservableObject {
     // Snapshot of the last-saved (or just-loaded) content; isDirty derives from this
     @Published private var savedContent: String = ""
 
+    /// True while a file is being read from disk or while the preview WebView is
+    /// rendering it. The preview pane shows a spinner in its place.
+    @Published var isLoading: Bool = false
+
     var isDirty: Bool { editingContent != savedContent }
 
     init() {
@@ -101,6 +105,7 @@ final class AppState: ObservableObject {
     // MARK: – File selection
 
     func selectFile(_ file: MarkdownFile) {
+        isLoading = true
         let text = (try? String(contentsOf: file.url, encoding: .utf8)) ?? file.content
         if let idx = files.firstIndex(of: file) {
             files[idx].content = text
@@ -112,6 +117,21 @@ final class AppState: ObservableObject {
         }
         editingContent = text
         savedContent = text
+        // isLoading stays true until MarkdownPreviewView reports the render is
+        // complete via `markPreviewRendered()`. For the Edit-only view mode there
+        // is no preview — flip the flag on the next runloop tick so the spinner
+        // doesn't get stuck if the user switched modes.
+        if viewMode == .edit {
+            DispatchQueue.main.async { [weak self] in
+                self?.isLoading = false
+            }
+        }
+    }
+
+    /// Called by `MarkdownPreviewView` once the WebView has finished rendering
+    /// the current markdown text. Clears the loading state.
+    func markPreviewRendered() {
+        if isLoading { isLoading = false }
     }
 
     // MARK: – Saving

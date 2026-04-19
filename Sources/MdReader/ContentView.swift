@@ -19,7 +19,7 @@ struct ContentView: View {
         if let name = appState.selectedFile?.name {
             return appState.isDirty ? "● \(name)" : name
         }
-        return "md-reader"
+        return "Preview-MD"
     }
 
     @ToolbarContentBuilder
@@ -62,14 +62,14 @@ struct DetailView: View {
             } else {
                 switch appState.viewMode {
                 case .preview:
-                    MarkdownPreviewView(markdownText: appState.editingContent)
+                    PreviewPane()
                 case .edit:
                     EditorView(text: $appState.editingContent)
                 case .split:
                     HSplitView {
                         EditorView(text: $appState.editingContent)
                             .frame(minWidth: 240)
-                        MarkdownPreviewView(markdownText: appState.editingContent)
+                        PreviewPane()
                             .frame(minWidth: 240)
                     }
                 }
@@ -79,22 +79,55 @@ struct DetailView: View {
     }
 }
 
+private struct PreviewPane: View {
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ZStack {
+            MarkdownPreviewView(
+                markdownText: appState.editingContent,
+                onRenderComplete: { appState.markPreviewRendered() }
+            )
+            if appState.isLoading {
+                Color(nsColor: .textBackgroundColor)
+                ProgressView()
+                    .controlSize(.large)
+            }
+        }
+    }
+}
+
 private struct EmptyStateView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "doc.text.magnifyingglass")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text(appState.folderURL == nil ? "Open a Markdown file or folder to get started" : "Select a file from the sidebar")
-                .font(.title3)
-                .foregroundStyle(.secondary)
+        VStack(spacing: 16) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.quaternary)
+                    .frame(width: 72, height: 72)
+                Image(systemName: "doc.richtext")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(.tertiary)
+            }
+            VStack(spacing: 6) {
+                Text(appState.folderURL == nil ? "No file open" : "No file selected")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.primary)
+                Text(appState.folderURL == nil
+                     ? "Open a Markdown file or folder to get started"
+                     : "Select a file from the sidebar")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
             if appState.folderURL == nil {
                 Button("Open…") { appState.openPanel() }
-                    .controlSize(.large)
+                    .controlSize(.regular)
+                    .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }

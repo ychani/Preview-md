@@ -8,30 +8,37 @@ struct SidebarView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Folder header
-            HStack {
+            HStack(spacing: 6) {
                 if let folder = appState.folderURL {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
                     Text(folder.lastPathComponent)
-                        .font(.caption.weight(.semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 } else {
-                    Text("No folder")
-                        .font(.caption)
+                    Text("FILES")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.tertiary)
+                        .tracking(0.8)
                 }
                 Spacer()
                 Button {
                     appState.openPanel()
                 } label: {
-                    Image(systemName: "folder.badge.plus")
-                        .imageScale(.medium)
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
                 }
                 .buttonStyle(.plain)
                 .help("Open file or folder…")
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.vertical, 9)
             .background(.bar)
 
             Divider()
@@ -40,12 +47,11 @@ struct SidebarView: View {
                 Spacer()
                 VStack(spacing: 8) {
                     Image(systemName: "doc.text")
-                        .font(.largeTitle)
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundStyle(.quaternary)
+                    Text("No Markdown files")
+                        .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
-                    Text("Open a folder\nto see Markdown files")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
                 }
                 Spacer()
             } else {
@@ -98,15 +104,22 @@ private struct FileRowView: View {
     let file: MarkdownFile
     let isSelected: Bool
 
+    private var displayName: String {
+        file.name.hasSuffix(".md")
+            ? String(file.name.dropLast(3))
+            : file.name
+    }
+
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "doc.text")
-                .imageScale(.small)
-                .foregroundStyle(isSelected ? .primary : .secondary)
-            Text(file.name)
+        HStack(spacing: 7) {
+            Image(systemName: "doc.text.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            Text(displayName)
+                .font(.system(size: 13))
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 1)
     }
 }

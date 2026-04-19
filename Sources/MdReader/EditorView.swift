@@ -5,7 +5,10 @@ struct EditorView: View {
 
     var body: some View {
         TextEditor(text: $text)
-            .font(.system(.body, design: .monospaced))
-            .padding(8)
+            .font(.system(size: 13, weight: .regular, design: .monospaced))
+            .lineSpacing(3)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .background(Color(nsColor: .textBackgroundColor))
     }
 }

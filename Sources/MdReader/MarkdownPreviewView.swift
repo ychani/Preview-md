@@ -5,6 +5,7 @@ import WebKit
 
 struct MarkdownPreviewView: NSViewRepresentable {
     let markdownText: String
+    var onRenderComplete: (() -> Void)?
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -21,10 +22,12 @@ struct MarkdownPreviewView: NSViewRepresentable {
 
         context.coordinator.webView = webView
         context.coordinator.pendingMarkdown = markdownText
+        context.coordinator.onRenderComplete = onRenderComplete
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.onRenderComplete = onRenderComplete
         context.coordinator.scheduleRender(markdownText)
     }
 
@@ -33,6 +36,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         weak var webView: WKWebView?
         var pendingMarkdown: String = ""
+        var onRenderComplete: (() -> Void)?
         private var lastRendered: String?
         private var isLoaded = false
         private var debounceItem: DispatchWorkItem?
@@ -52,7 +56,9 @@ struct MarkdownPreviewView: NSViewRepresentable {
             guard isLoaded, let webView else { return }
             let markdown = pendingMarkdown
             guard let js = MarkdownRenderBridge.renderJS(for: markdown) else { return }
-            webView.evaluateJavaScript(js, completionHandler: nil)
+            webView.evaluateJavaScript(js) { [weak self] _, _ in
+                self?.onRenderComplete?()
+            }
             lastRendered = markdown
         }
 
