@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:; font-src 'self' data:;">
+<title>Preview</title>
+<link rel="stylesheet" href="preview.css">
+<script src="marked.min.js"></script>
+<script src="purify.min.js"></script>
+</head>
+<body>
+<article id="content" class="markdown-body"></article>
+<script>
+  (function () {
+    if (window.marked && typeof marked.setOptions === "function") {
+      marked.setOptions({ gfm: true, breaks: false });
+    }
+  })();
+
+  function render(md) {
+    var el = document.getElementById('content');
+    if (!el) return;
+    var scrollY = window.scrollY;
+    var text = typeof md === "string" ? md : String(md == null ? "" : md);
+    var html;
+    try {
+      html = window.marked ? marked.parse(text) : text;
+    } catch (e) {
+      html = "<pre>" + String(e) + "</pre>";
+    }
+    if (window.DOMPurify) {
+      html = DOMPurify.sanitize(html, {
+        ADD_ATTR: ['target'],
+        FORBID_TAGS: ['style', 'iframe', 'form', 'object', 'embed'],
+        FORBID_ATTR: ['onerror', 'onload', 'onclick']
+      });
+    }
+    el.innerHTML = html;
+    window.scrollTo(0, scrollY);
+  }
+
+  window.render = render;
+</script>
+</body>
+</html>
