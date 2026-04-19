@@ -33,6 +33,7 @@ app: build
 	cp $(BUILD_DIR)/$(APP_NAME) $(MACOS_DIR)/$(APP_NAME)
 	cp -R $(BUILD_DIR)/$(RESOURCE_BUNDLE) $(RESOURCES_DIR)/
 	cp packaging/Info.plist $(CONTENTS)/Info.plist
+	cp packaging/AppIcon.icns $(RESOURCES_DIR)/AppIcon.icns
 	printf 'APPL????' > $(CONTENTS)/PkgInfo
 	$(MAKE) appex
 	@echo "Built $(APP_DIR)"

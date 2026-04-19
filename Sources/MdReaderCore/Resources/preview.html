@@ -7,6 +7,7 @@
 <link rel="stylesheet" href="preview.css">
 <script src="marked.min.js"></script>
 <script src="purify.min.js"></script>
+<script src="mermaid.min.js"></script>
 </head>
 <body>
 <article id="content" class="markdown-body"></article>
@@ -15,7 +16,68 @@
     if (window.marked && typeof marked.setOptions === "function") {
       marked.setOptions({ gfm: true, breaks: false });
     }
+    if (window.mermaid && typeof mermaid.initialize === "function") {
+      var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      try {
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: isDark ? 'dark' : 'neutral'
+        });
+      } catch (e) {}
+    }
   })();
+
+  function transformMermaidBlocks() {
+    var blocks = document.querySelectorAll('#content pre > code.language-mermaid');
+    blocks.forEach(function (code) {
+      var pre = code.parentElement;
+      if (!pre) return;
+      var div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = code.textContent;
+      pre.replaceWith(div);
+    });
+  }
+
+  function runMermaid() {
+    if (!window.mermaid || typeof mermaid.run !== 'function') return;
+    var nodes = document.querySelectorAll('#content .mermaid');
+    if (!nodes.length) return;
+    try {
+      mermaid.run({ nodes: nodes });
+    } catch (e) {
+      nodes.forEach(function (n) {
+        if (!n.dataset.processed) {
+          n.textContent = 'Mermaid error: ' + String(e && e.message ? e.message : e);
+          n.classList.add('mermaid-error');
+        }
+      });
+    }
+  }
+
+  function extractTOC() {
+    var nodes = document.querySelectorAll('#content h1, #content h2, #content h3');
+    var entries = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (!el.id) {
+        el.id = 'heading-' + i;
+      }
+      entries.push({
+        level: parseInt(el.tagName.substring(1), 10),
+        text: el.innerText || el.textContent || '',
+        id: el.id
+      });
+    }
+    try {
+      if (window.webkit &&
+          window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.tocUpdate) {
+        window.webkit.messageHandlers.tocUpdate.postMessage(entries);
+      }
+    } catch (e) {}
+  }
 
   function render(md) {
     var el = document.getElementById('content');
@@ -36,6 +98,11 @@
       });
     }
     el.innerHTML = html;
+
+    transformMermaidBlocks();
+    runMermaid();
+    extractTOC();
+
     window.scrollTo(0, scrollY);
   }
 

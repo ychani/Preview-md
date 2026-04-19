@@ -4,6 +4,11 @@ import SwiftUI
 struct MdReaderApp: App {
     @StateObject private var appState = AppState()
 
+    private func recentLabel(for url: URL) -> String {
+        let name = url.lastPathComponent
+        return name.isEmpty ? url.path : name
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -21,6 +26,22 @@ struct MdReaderApp: App {
                     appState.openPanel()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Menu("Open Recent") {
+                    ForEach(appState.recentURLs, id: \.self) { url in
+                        Button(recentLabel(for: url)) {
+                            appState.open(url: url)
+                        }
+                    }
+                    if !appState.recentURLs.isEmpty {
+                        Divider()
+                    }
+                    Button("Clear Menu") {
+                        appState.clearRecents()
+                    }
+                    .disabled(appState.recentURLs.isEmpty)
+                }
+                .disabled(appState.recentURLs.isEmpty)
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Save") {
@@ -28,6 +49,13 @@ struct MdReaderApp: App {
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(!appState.isDirty)
+            }
+            CommandGroup(after: .textEditing) {
+                Button(appState.isFindBarVisible ? "Hide Find" : "Find…") {
+                    appState.toggleFindBar()
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(appState.selectedFile == nil)
             }
             CommandMenu("View") {
                 Button("Preview") { appState.viewMode = .preview }

@@ -4,13 +4,27 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
-        HSplitView {
-            SidebarView()
-                .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
+        VStack(spacing: 0) {
+            if appState.isFindBarVisible {
+                FindBar()
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            HSplitView {
+                SidebarView()
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
 
-            DetailView()
-                .frame(minWidth: 480)
+                DetailView()
+                    .frame(minWidth: 420)
+
+                if appState.showTOC {
+                    TOCView(entries: appState.tocEntries) { entry in
+                        appState.scrollToHeading(entry.id)
+                    }
+                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
+                }
+            }
         }
+        .animation(.easeInOut(duration: 0.15), value: appState.isFindBarVisible)
         .toolbar { toolbarContent }
         .navigationTitle(toolbarTitle)
     }
@@ -47,6 +61,16 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .frame(width: 220)
+            .disabled(appState.selectedFile == nil)
+        }
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                appState.showTOC.toggle()
+            } label: {
+                Image(systemName: "list.bullet.indent")
+            }
+            .help(appState.showTOC ? "Hide Table of Contents" : "Show Table of Contents")
             .disabled(appState.selectedFile == nil)
         }
     }
@@ -86,7 +110,10 @@ private struct PreviewPane: View {
         ZStack {
             MarkdownPreviewView(
                 markdownText: appState.editingContent,
-                onRenderComplete: { appState.markPreviewRendered() }
+                onRenderComplete: { appState.markPreviewRendered() },
+                onTOCUpdate: { entries in appState.tocEntries = entries },
+                scrollRequest: appState.scrollRequest,
+                onWebViewReady: { webView in appState.previewWebView = webView }
             )
             if appState.isLoading {
                 Color(nsColor: .textBackgroundColor)

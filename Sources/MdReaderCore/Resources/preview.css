@@ -344,6 +344,24 @@ details[open] summary { margin-bottom: 0.5em; }
   display: flex;
   justify-content: center;
   margin: 1.5em 0;
+  overflow-x: auto;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.mermaid.mermaid-error {
+  display: block;
+  background: var(--bg-code);
+  color: #b00020;
+  padding: 10px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  text-align: left;
+  white-space: pre-wrap;
 }
 
 /* ── Scrollbar ──────────────────────────────────────────────── */
