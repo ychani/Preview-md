@@ -87,11 +87,11 @@ private struct EmptyStateView: View {
             Image(systemName: "doc.text.magnifyingglass")
                 .font(.system(size: 48))
                 .foregroundStyle(.tertiary)
-            Text(appState.folderURL == nil ? "Open a folder to get started" : "Select a file from the sidebar")
+            Text(appState.folderURL == nil ? "Open a Markdown file or folder to get started" : "Select a file from the sidebar")
                 .font(.title3)
                 .foregroundStyle(.secondary)
             if appState.folderURL == nil {
-                Button("Open Folder…") { appState.openFolderPanel() }
+                Button("Open…") { appState.openPanel() }
                     .controlSize(.large)
             }
         }

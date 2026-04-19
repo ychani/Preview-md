@@ -1,8 +1,8 @@
-# md-reader Makefile
-# Wraps the SPM release build into MdReader.app (containing MdReaderQL.appex).
+# Preview-MD Makefile
+# Wraps the SPM release build into Preview-MD.app (contains the Quick Look .appex).
 
-APP_NAME          := MdReader
-QL_NAME           := MdReaderQL
+APP_NAME          := Preview-MD
+QL_NAME           := Preview-MD-QL
 BUILD_DIR         := .build/release
 DIST_DIR          := dist
 APP_DIR           := $(DIST_DIR)/$(APP_NAME).app
@@ -14,7 +14,7 @@ APPEX_DIR         := $(PLUGINS_DIR)/$(QL_NAME).appex
 APPEX_CONTENTS    := $(APPEX_DIR)/Contents
 APPEX_MACOS       := $(APPEX_CONTENTS)/MacOS
 APPEX_RESOURCES   := $(APPEX_CONTENTS)/Resources
-RESOURCE_BUNDLE   := $(APP_NAME)_MdReaderCore.bundle
+RESOURCE_BUNDLE   := PreviewMD_MdReaderCore.bundle
 USER_APPS         := $(HOME)/Applications
 
 .PHONY: all build run app appex clean install-ql
@@ -25,7 +25,7 @@ build:
 	swift build -c release
 
 run:
-	swift run
+	swift run Preview-MD
 
 app: build
 	rm -rf $(APP_DIR)

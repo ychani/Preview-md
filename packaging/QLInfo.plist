@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleExecutable</key><string>MdReaderQL</string>
-  <key>CFBundleIdentifier</key><string>com.mdreader.app.quicklook</string>
+  <key>CFBundleExecutable</key><string>Preview-MD-QL</string>
+  <key>CFBundleIdentifier</key><string>com.preview-md.app.quicklook</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>MdReaderQL</string>
-  <key>CFBundleDisplayName</key><string>md-reader Quick Look</string>
+  <key>CFBundleName</key><string>Preview-MD-QL</string>
+  <key>CFBundleDisplayName</key><string>Preview-MD Quick Look</string>
   <key>CFBundlePackageType</key><string>XPC!</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 

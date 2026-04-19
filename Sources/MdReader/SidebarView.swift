@@ -22,13 +22,13 @@ struct SidebarView: View {
                 }
                 Spacer()
                 Button {
-                    appState.openFolderPanel()
+                    appState.openPanel()
                 } label: {
                     Image(systemName: "folder.badge.plus")
                         .imageScale(.medium)
                 }
                 .buttonStyle(.plain)
-                .help("Open Folder")
+                .help("Open file or folder…")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

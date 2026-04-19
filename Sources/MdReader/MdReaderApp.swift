@@ -9,13 +9,16 @@ struct MdReaderApp: App {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 820, minHeight: 520)
+                .onOpenURL { url in
+                    appState.open(url: url)
+                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Open Folder…") {
-                    appState.openFolderPanel()
+                Button("Open…") {
+                    appState.openPanel()
                 }
                 .keyboardShortcut("o", modifiers: .command)
             }

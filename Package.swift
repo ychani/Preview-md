@@ -1,12 +1,15 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
+// Package-level name stays identifier-safe (`PreviewMD`) because it feeds the
+// generated resource bundle name (`PreviewMD_MdReaderCore.bundle`). The
+// user-facing product names use the hyphenated "Preview-MD".
 let package = Package(
-    name: "MdReader",
+    name: "PreviewMD",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "MdReader", targets: ["MdReader"]),
-        .executable(name: "MdReaderQL", targets: ["MdReaderQL"]),
+        .executable(name: "Preview-MD", targets: ["MdReader"]),
+        .executable(name: "Preview-MD-QL", targets: ["MdReaderQL"]),
         .library(name: "MdReaderCore", targets: ["MdReaderCore"]),
     ],
     targets: [

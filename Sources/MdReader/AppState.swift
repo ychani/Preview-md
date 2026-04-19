@@ -1,8 +1,11 @@
 import AppKit
 import Combine
 import Foundation
+import UniformTypeIdentifiers
 
 private let kBookmarkKey = "FolderSecurityBookmark"
+
+private let kMarkdownExtensions: Set<String> = ["md", "markdown"]
 
 @MainActor
 final class AppState: ObservableObject {
@@ -23,26 +26,51 @@ final class AppState: ObservableObject {
         restoreBookmark()
     }
 
-    // MARK: – Folder
+    // MARK: – Open (file or folder)
 
-    func openFolderPanel() {
+    /// Shows an NSOpenPanel that accepts either a `.md`/`.markdown` file or a folder.
+    func openPanel() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Open Folder"
+        panel.prompt = "Open"
+        panel.message = "Choose a Markdown file or a folder of Markdown files."
+        var types: [UTType] = [.plainText]
+        if let md = UTType(filenameExtension: "md") { types.insert(md, at: 0) }
+        panel.allowedContentTypes = types
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        saveBookmark(for: url)
-        loadFolder(url)
+        open(url: url)
     }
 
-    func loadFolder(_ url: URL) {
+    /// Routes an arbitrary URL (from the open panel, `onOpenURL`, Dock drop, or
+    /// Finder double-click) to the right loader.
+    func open(url: URL) {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+        if isDir.boolValue {
+            saveBookmark(for: url)
+            loadFolder(url)
+        } else {
+            openFile(at: url)
+        }
+    }
+
+    /// Opens a single Markdown file. Loads its containing folder into the sidebar
+    /// so sibling files remain browsable, then selects the file.
+    func openFile(at url: URL) {
+        let folder = url.deletingLastPathComponent()
+        saveBookmark(for: folder)
+        loadFolder(folder, preferredSelection: url)
+    }
+
+    func loadFolder(_ url: URL, preferredSelection: URL? = nil) {
         folderURL = url
         do {
             let contents = try FileManager.default.contentsOfDirectory(
                 at: url, includingPropertiesForKeys: nil)
             files = contents
-                .filter { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
+                .filter { kMarkdownExtensions.contains($0.pathExtension.lowercased()) }
                 .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
                 .map { fileURL in
                     let text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
@@ -51,7 +79,14 @@ final class AppState: ObservableObject {
         } catch {
             files = []
         }
-        if let first = files.first {
+        let target: MarkdownFile?
+        if let preferred = preferredSelection,
+           let match = files.first(where: { $0.url.standardizedFileURL == preferred.standardizedFileURL }) {
+            target = match
+        } else {
+            target = files.first
+        }
+        if let first = target {
             selectFile(first)
         } else {
             selectedFile = nil
@@ -59,6 +94,9 @@ final class AppState: ObservableObject {
             savedContent = ""
         }
     }
+
+    /// Back-compat shim for existing call sites that used the folder-only entry point.
+    func openFolderPanel() { openPanel() }
 
     // MARK: – File selection
 
