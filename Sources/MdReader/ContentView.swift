@@ -64,10 +64,10 @@ struct DetailView: View {
                 case .preview:
                     MarkdownPreviewView(markdownText: appState.editingContent)
                 case .edit:
-                    EditorView(text: $appState.editingContent, isDirty: $appState.isDirty)
+                    EditorView(text: $appState.editingContent)
                 case .split:
                     HSplitView {
-                        EditorView(text: $appState.editingContent, isDirty: $appState.isDirty)
+                        EditorView(text: $appState.editingContent)
                             .frame(minWidth: 240)
                         MarkdownPreviewView(markdownText: appState.editingContent)
                             .frame(minWidth: 240)

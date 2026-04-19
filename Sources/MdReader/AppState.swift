@@ -10,10 +10,14 @@ final class AppState: ObservableObject {
     @Published var files: [MarkdownFile] = []
     @Published var selectedFile: MarkdownFile?
     @Published var viewMode: ViewMode = .preview
-    @Published var isDirty: Bool = false
 
     // Editable text for the currently open file
     @Published var editingContent: String = ""
+
+    // Snapshot of the last-saved (or just-loaded) content; isDirty derives from this
+    @Published private var savedContent: String = ""
+
+    var isDirty: Bool { editingContent != savedContent }
 
     init() {
         restoreBookmark()
@@ -52,7 +56,7 @@ final class AppState: ObservableObject {
         } else {
             selectedFile = nil
             editingContent = ""
-            isDirty = false
+            savedContent = ""
         }
     }
 
@@ -69,7 +73,7 @@ final class AppState: ObservableObject {
             selectedFile = refreshed
         }
         editingContent = text
-        isDirty = false
+        savedContent = text
     }
 
     // MARK: – Saving
@@ -82,7 +86,7 @@ final class AppState: ObservableObject {
             if let idx = files.firstIndex(of: file) {
                 files[idx].content = editingContent
             }
-            isDirty = false
+            savedContent = editingContent
         } catch {
             let alert = NSAlert()
             alert.messageText = "Could not save file"
