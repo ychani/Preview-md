@@ -62,19 +62,16 @@ struct MdReaderApp: App {
                 .keyboardShortcut("f", modifiers: .command)
                 .disabled(appState.selectedFile == nil)
             }
-            CommandMenu("View") {
+            CommandGroup(after: .toolbar) {
                 Button("Preview") { appState.viewMode = .preview }
                     .keyboardShortcut("1", modifiers: [.command])
+                    .disabled(appState.selectedFile == nil)
                 Button("Split") { appState.viewMode = .split }
                     .keyboardShortcut("2", modifiers: [.command])
+                    .disabled(appState.selectedFile == nil)
                 Button("Edit") { appState.viewMode = .edit }
                     .keyboardShortcut("3", modifiers: [.command])
-                Divider()
-                Button(appState.showSidebar ? "Hide Sidebar" : "Show Sidebar") {
-                    appState.toggleSidebar()
-                }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
-                .disabled(appState.files.isEmpty)
+                    .disabled(appState.selectedFile == nil)
             }
         }
     }

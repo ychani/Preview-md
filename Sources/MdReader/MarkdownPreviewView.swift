@@ -97,6 +97,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoaded = true
             flushRender()
+            // Safety net: clear the loading state as soon as the shell has
+            // loaded, so the spinner disappears even if `render()` somehow
+            // fails to call back (missing resources, JS error, etc.).
+            onRenderComplete?()
         }
 
         func webView(

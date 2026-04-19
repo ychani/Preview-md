@@ -244,6 +244,13 @@ final class AppState: ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 self?.isLoading = false
             }
+        } else {
+            // Safety timeout: if the preview pipeline never calls back (view
+            // not mounted yet, navigation stalls, etc.), force-clear so the
+            // spinner doesn't strand the UI.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                self?.isLoading = false
+            }
         }
     }
 

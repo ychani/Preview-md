@@ -42,49 +42,69 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbarContent }
-        .navigationTitle(toolbarTitle)
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let typeID = UTType.fileURL.identifier
         var collected: [(Int, URL)] = []
         let lock = NSLock()
         let group = DispatchGroup()
+        var accepted = false
+
         for (index, provider) in providers.enumerated() {
-            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { continue }
+            guard provider.hasItemConformingToTypeIdentifier(typeID) else { continue }
+            accepted = true
             group.enter()
-            _ = provider.loadDataRepresentation(
-                forTypeIdentifier: UTType.fileURL.identifier
-            ) { data, _ in
+            provider.loadItem(forTypeIdentifier: typeID, options: nil) { item, _ in
                 defer { group.leave() }
-                guard let data,
-                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                let url: URL?
+                switch item {
+                case let u as URL:
+                    url = u
+                case let data as Data:
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                case let str as String:
+                    url = URL(string: str)
+                default:
+                    url = nil
+                }
+                guard let url else { return }
                 lock.lock()
                 collected.append((index, url))
                 lock.unlock()
             }
         }
+
         group.notify(queue: .main) {
             let ordered = collected.sorted { $0.0 < $1.0 }.map { $0.1 }
             guard !ordered.isEmpty else { return }
             appState.openDroppedFiles(ordered)
         }
-        return true
+        return accepted
     }
 
-    private var toolbarTitle: String {
-        if let name = appState.selectedFile?.name {
-            return appState.isDirty ? "● \(name)" : name
-        }
-        return "Preview-MD"
+    private var displayFilename: String {
+        guard let name = appState.selectedFile?.name else { return "No file" }
+        if name.hasSuffix(".md") { return String(name.dropLast(3)) }
+        if name.hasSuffix(".markdown") { return String(name.dropLast(9)) }
+        return name
     }
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
+            Button {
+                appState.toggleSidebar()
+            } label: {
+                Image(systemName: "sidebar.left")
+            }
+            .help(appState.showSidebar ? "Hide Sidebar" : "Show Sidebar")
+            .disabled(appState.files.isEmpty)
+        }
+
+        ToolbarItem(placement: .navigation) {
             HStack(spacing: 6) {
-                Image(systemName: "doc.text")
-                    .foregroundStyle(.secondary)
-                Text(appState.selectedFile?.name ?? "No file")
+                Text(displayFilename)
                     .font(.headline)
                     .foregroundStyle(appState.selectedFile == nil ? .secondary : .primary)
                 if appState.isDirty {
