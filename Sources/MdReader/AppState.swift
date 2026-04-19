@@ -10,12 +10,27 @@ private let kMaxRecents = 10
 
 private let kMarkdownExtensions: Set<String> = ["md", "markdown"]
 
+/// The sidebar can display one of two populations: the contents of a folder the
+/// user opened, or an ad-hoc list of explicitly-opened files (picker, drag,
+/// Finder double-click).
+enum SidebarMode {
+    case openedFiles
+    case folder
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var folderURL: URL?
     @Published var files: [MarkdownFile] = []
     @Published var selectedFile: MarkdownFile?
     @Published var viewMode: ViewMode = .preview
+
+    /// Which population `files` represents. Drives sidebar header + context menu.
+    @Published var sidebarMode: SidebarMode = .openedFiles
+
+    /// Whether the file sidebar is visible. Defaults to hidden for single-file
+    /// opens; shown for folder opens and drag-to-open.
+    @Published var showSidebar: Bool = false
 
     // Editable text for the currently open file
     @Published var editingContent: String = ""
@@ -83,12 +98,12 @@ final class AppState: ObservableObject {
         open(url: url)
     }
 
-    /// Routes an arbitrary URL (from the open panel, `onOpenURL`, Dock drop, or
-    /// Finder double-click) to the right loader.
+    /// Routes an arbitrary URL (from the open panel, `onOpenURL`, or Finder
+    /// double-click of a single file) to the right loader. A single-file open
+    /// hides the sidebar; a folder open shows it.
     func open(url: URL) {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
-            // File/folder no longer exists — drop it from recents if present.
             removeRecent(url)
             return
         }
@@ -101,16 +116,79 @@ final class AppState: ObservableObject {
         addRecent(url)
     }
 
-    /// Opens a single Markdown file. Loads its containing folder into the sidebar
-    /// so sibling files remain browsable, then selects the file.
+    /// Opens a single Markdown file as the sole entry in the sidebar. Hides the
+    /// sidebar by default — user can reveal it with ⌘⇧L.
     func openFile(at url: URL) {
-        let folder = url.deletingLastPathComponent()
-        saveBookmark(for: folder)
-        loadFolder(folder, preferredSelection: url)
+        sidebarMode = .openedFiles
+        folderURL = nil
+        showSidebar = false
+        let file = MarkdownFile(url: url)
+        files = [file]
+        selectFile(file)
+    }
+
+    /// Adds one or more files to the opened-files list. Used for drag-and-drop
+    /// onto the window or Dock icon. Preserves existing entries, dedupes by
+    /// standardized URL, and reveals the sidebar.
+    func openDroppedFiles(_ urls: [URL]) {
+        let markdownURLs = urls.filter {
+            kMarkdownExtensions.contains($0.pathExtension.lowercased())
+        }
+        guard !markdownURLs.isEmpty else { return }
+
+        // Drops discard any previously-loaded folder context.
+        if sidebarMode == .folder {
+            files = []
+            folderURL = nil
+            sidebarMode = .openedFiles
+        }
+
+        let existing = Set(files.map { $0.url.standardizedFileURL })
+        var firstNew: MarkdownFile?
+        for url in markdownURLs {
+            let std = url.standardizedFileURL
+            if existing.contains(std) { continue }
+            let file = MarkdownFile(url: std)
+            files.append(file)
+            if firstNew == nil { firstNew = file }
+        }
+
+        showSidebar = true
+
+        if selectedFile == nil, let target = firstNew ?? files.first {
+            selectFile(target)
+        }
+
+        for url in markdownURLs { addRecent(url) }
+    }
+
+    /// Removes a file from the session list. Session-only — files are not
+    /// deleted on disk. Valid only in `.openedFiles` mode; the folder view has
+    /// no "remove" concept.
+    func removeFromList(_ file: MarkdownFile) {
+        guard sidebarMode == .openedFiles else { return }
+        guard let idx = files.firstIndex(of: file) else { return }
+        let wasSelected = selectedFile == file
+        files.remove(at: idx)
+        if wasSelected {
+            if let next = files.first {
+                selectFile(next)
+            } else {
+                selectedFile = nil
+                editingContent = ""
+                savedContent = ""
+            }
+        }
+    }
+
+    func toggleSidebar() {
+        showSidebar.toggle()
     }
 
     func loadFolder(_ url: URL, preferredSelection: URL? = nil) {
         folderURL = url
+        sidebarMode = .folder
+        showSidebar = true
         do {
             let contents = try FileManager.default.contentsOfDirectory(
                 at: url, includingPropertiesForKeys: nil)

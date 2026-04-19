@@ -1,7 +1,9 @@
+import AppKit
 import SwiftUI
 
 @main
 struct MdReaderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appState = AppState()
 
     private func recentLabel(for url: URL) -> String {
@@ -14,6 +16,9 @@ struct MdReaderApp: App {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 820, minHeight: 520)
+                .onAppear {
+                    appDelegate.appState = appState
+                }
                 .onOpenURL { url in
                     appState.open(url: url)
                 }
@@ -64,7 +69,54 @@ struct MdReaderApp: App {
                     .keyboardShortcut("2", modifiers: [.command])
                 Button("Edit") { appState.viewMode = .edit }
                     .keyboardShortcut("3", modifiers: [.command])
+                Divider()
+                Button(appState.showSidebar ? "Hide Sidebar" : "Show Sidebar") {
+                    appState.toggleSidebar()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+                .disabled(appState.files.isEmpty)
             }
+        }
+    }
+}
+
+/// NSApplicationDelegate adaptor so we can receive multi-URL Dock drops via
+/// `application(_:open:)` (SwiftUI's `onOpenURL` is called once per URL and
+/// can't tell a burst of drops apart from a single Finder double-click).
+///
+/// Dock drops can arrive before the SwiftUI scene has wired `appState` in via
+/// `onAppear`; we buffer pending URLs and flush when the reference lands.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var pending: [[URL]] = []
+    private var _appState: AppState?
+
+    var appState: AppState? {
+        get { _appState }
+        set {
+            _appState = newValue
+            guard let state = newValue else { return }
+            let batches = pending
+            pending.removeAll()
+            Task { @MainActor in
+                for urls in batches { Self.deliver(urls, to: state) }
+            }
+        }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        if let state = _appState {
+            Task { @MainActor in Self.deliver(urls, to: state) }
+        } else {
+            pending.append(urls)
+        }
+    }
+
+    @MainActor
+    private static func deliver(_ urls: [URL], to state: AppState) {
+        if urls.count == 1, let url = urls.first {
+            state.open(url: url)
+        } else if urls.count > 1 {
+            state.openDroppedFiles(urls)
         }
     }
 }

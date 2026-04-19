@@ -9,7 +9,7 @@ struct SidebarView: View {
         VStack(spacing: 0) {
             // Folder header
             HStack(spacing: 6) {
-                if let folder = appState.folderURL {
+                if appState.sidebarMode == .folder, let folder = appState.folderURL {
                     Image(systemName: "folder.fill")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
@@ -67,6 +67,13 @@ struct SidebarView: View {
                     FileRowView(file: file, isSelected: appState.selectedFile?.id == file.id)
                         .tag(file.id)
                         .onTapGesture { attemptSelect(file) }
+                        .contextMenu {
+                            if appState.sidebarMode == .openedFiles {
+                                Button("Remove from List") {
+                                    appState.removeFromList(file)
+                                }
+                            }
+                        }
                 }
                 .listStyle(.sidebar)
             }

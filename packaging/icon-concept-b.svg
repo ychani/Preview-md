@@ -1,0 +1,71 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Warm parchment background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0%" stop-color="#f5f0e8"/>
+      <stop offset="100%" stop-color="#e8dfc8"/>
+    </linearGradient>
+    <!-- Paper white -->
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f8f4ef"/>
+    </linearGradient>
+    <!-- Blue accent for # -->
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2563eb"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <filter id="paperShadow">
+      <feDropShadow dx="0" dy="12" stdDeviation="22" flood-color="#7c6a50" flood-opacity="0.28"/>
+    </filter>
+    <filter id="subtleShadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <!-- Warm background -->
+  <rect width="1024" height="1024" rx="220" fill="url(#bg)"/>
+
+  <!-- Subtle grid texture suggestion -->
+  <line x1="0" y1="340" x2="1024" y2="340" stroke="#c8b898" stroke-width="1" opacity="0.4"/>
+  <line x1="0" y1="512" x2="1024" y2="512" stroke="#c8b898" stroke-width="1" opacity="0.4"/>
+  <line x1="0" y1="684" x2="1024" y2="684" stroke="#c8b898" stroke-width="1" opacity="0.4"/>
+
+  <!-- Paper card -->
+  <rect x="174" y="148" width="560" height="680" rx="28" fill="url(#paper)" filter="url(#paperShadow)"/>
+
+  <!-- Top rule inside paper -->
+  <rect x="174" y="148" width="560" height="10" rx="5" fill="#e8e2d8" opacity="0.7"/>
+
+  <!-- # symbol — large, in accent blue, top of paper -->
+  <text x="224" y="358"
+    font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', sans-serif"
+    font-weight="800" font-size="196" fill="url(#accent)"
+    filter="url(#subtleShadow)">#</text>
+
+  <!-- Heading text beside it — implied -->
+  <rect x="224" y="396" width="400" height="22" rx="11" fill="#1c1917" opacity="0.82"/>
+
+  <!-- Thin rule -->
+  <rect x="224" y="436" width="448" height="2" rx="1" fill="#e2dbd0"/>
+
+  <!-- Body text lines -->
+  <rect x="224" y="466" width="360" height="14" rx="7" fill="#78716c" opacity="0.55"/>
+  <rect x="224" y="492" width="430" height="14" rx="7" fill="#78716c" opacity="0.42"/>
+  <rect x="224" y="518" width="300" height="14" rx="7" fill="#78716c" opacity="0.36"/>
+
+  <!-- Code block -->
+  <rect x="224" y="552" width="448" height="88" rx="12" fill="#f0ede6"/>
+  <rect x="244" y="572" width="200" height="12" rx="6" fill="#a09080" opacity="0.7"/>
+  <rect x="244" y="594" width="280" height="12" rx="6" fill="#a09080" opacity="0.55"/>
+  <rect x="244" y="616" width="160" height="12" rx="6" fill="#a09080" opacity="0.45"/>
+
+  <!-- More lines -->
+  <rect x="224" y="660" width="390" height="14" rx="7" fill="#78716c" opacity="0.38"/>
+  <rect x="224" y="686" width="320" height="14" rx="7" fill="#78716c" opacity="0.30"/>
+
+  <!-- Blockquote -->
+  <rect x="224" y="722" width="4" height="56" rx="2" fill="#c084fc"/>
+  <rect x="240" y="734" width="260" height="12" rx="6" fill="#78716c" opacity="0.38"/>
+  <rect x="240" y="754" width="210" height="12" rx="6" fill="#78716c" opacity="0.28"/>
+</svg>

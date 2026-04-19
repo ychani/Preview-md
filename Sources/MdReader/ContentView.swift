@@ -1,7 +1,9 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var isDropTargeted = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -10,8 +12,10 @@ struct ContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
             HSplitView {
-                SidebarView()
-                    .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
+                if appState.showSidebar {
+                    SidebarView()
+                        .frame(minWidth: 180, idealWidth: 220, maxWidth: 320)
+                }
 
                 DetailView()
                     .frame(minWidth: 420)
@@ -25,8 +29,46 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.15), value: appState.isFindBarVisible)
+        .animation(.easeInOut(duration: 0.15), value: appState.showSidebar)
+        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers)
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
         .toolbar { toolbarContent }
         .navigationTitle(toolbarTitle)
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        var collected: [(Int, URL)] = []
+        let lock = NSLock()
+        let group = DispatchGroup()
+        for (index, provider) in providers.enumerated() {
+            guard provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) else { continue }
+            group.enter()
+            _ = provider.loadDataRepresentation(
+                forTypeIdentifier: UTType.fileURL.identifier
+            ) { data, _ in
+                defer { group.leave() }
+                guard let data,
+                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+                lock.lock()
+                collected.append((index, url))
+                lock.unlock()
+            }
+        }
+        group.notify(queue: .main) {
+            let ordered = collected.sorted { $0.0 < $1.0 }.map { $0.1 }
+            guard !ordered.isEmpty else { return }
+            appState.openDroppedFiles(ordered)
+        }
+        return true
     }
 
     private var toolbarTitle: String {
