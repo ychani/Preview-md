@@ -12,6 +12,7 @@ Built with SwiftUI + WKWebView. Zero Swift dependencies. Markdown rendered with 
 - **Safe rendering** — DOMPurify sanitizes HTML; external links open in the default browser
 - **Unsaved-changes guard** — warns before switching files with unsaved edits
 - **Persistent folder** — remembers your last folder via security-scoped bookmark
+- **Finder Quick Look** — press Space on any `.md` / `.markdown` file for a rendered preview
 
 ## Requirements
 
@@ -32,31 +33,60 @@ swift run
 # Release build (executable binary)
 swift build -c release
 
-# Package as MdReader.app (Applications-ready bundle)
+# Package as MdReader.app (contains the Quick Look .appex extension)
 make app
 open dist/MdReader.app
+
+# Install to ~/Applications and register the Quick Look extension
+make install-ql
 ```
+
+## Quick Look extension
+
+`make app` produces `dist/MdReader.app` with `MdReaderQL.appex` embedded in `Contents/PlugIns/`. The extension implements `QLPreviewingController` and renders Markdown with the same HTML shell as the main app.
+
+To register it so Finder's Space-bar preview uses it:
+
+```bash
+make install-ql     # builds + copies to ~/Applications, then refreshes Quick Look
+```
+
+Notes:
+- First launch the app once from `~/Applications/MdReader.app` so Launch Services records the bundle, then press Space on any `.md` file in Finder.
+- The extension is registered per-user. On first use macOS may ask you to trust the extension in **System Settings → Privacy & Security → Extensions → Quick Look**.
+- If previews don't show up, run `qlmanage -r && qlmanage -r cache` and retry.
+- Since this is built with SPM (unsigned), macOS may block the extension under Gatekeeper. Right-click the app and choose Open the first time, or sign it with your own Developer ID for distribution.
 
 ## Project layout
 
 ```
 md-reader/
-├── Package.swift                   # SPM manifest
-├── Sources/MdReader/
-│   ├── MdReaderApp.swift           # @main, window + commands
-│   ├── ContentView.swift           # HSplitView + toolbar (view-mode picker)
-│   ├── SidebarView.swift           # Folder header + file list
-│   ├── EditorView.swift            # Monospaced TextEditor
-│   ├── MarkdownPreviewView.swift   # WKWebView + safe render bridge
-│   ├── AppState.swift              # Observable state + folder/file I/O
-│   ├── MarkdownFile.swift          # Identifiable file model
-│   ├── ViewMode.swift              # .preview / .split / .edit
-│   └── Resources/
-│       ├── marked.min.js           # vendored markdown parser (MIT)
-│       ├── purify.min.js           # vendored HTML sanitizer (Apache-2.0 / MPL-2.0)
-│       ├── preview.html            # WebView shell + render bridge
-│       └── preview.css             # GitHub-style CSS, auto dark mode
-├── Makefile                        # `make app` builds MdReader.app
+├── Package.swift                   # SPM manifest (3 targets)
+├── Sources/
+│   ├── MdReaderCore/               # shared library: resources + render bridge
+│   │   ├── MdReaderCore.swift      # public resource accessor (Bundle.module)
+│   │   ├── MarkdownRenderBridge.swift  # safe JS call builder
+│   │   └── Resources/
+│   │       ├── marked.min.js       # vendored markdown parser (MIT)
+│   │       ├── purify.min.js       # vendored HTML sanitizer (Apache-2.0 / MPL-2.0)
+│   │       ├── preview.html        # WebView shell + render bridge
+│   │       └── preview.css         # GitHub-style CSS, auto dark mode
+│   ├── MdReader/                   # the main app (depends on MdReaderCore)
+│   │   ├── MdReaderApp.swift       # @main, window + commands
+│   │   ├── ContentView.swift       # HSplitView + toolbar (view-mode picker)
+│   │   ├── SidebarView.swift       # Folder header + file list
+│   │   ├── EditorView.swift        # Monospaced TextEditor
+│   │   ├── MarkdownPreviewView.swift  # WKWebView + safe render bridge
+│   │   ├── AppState.swift          # Observable state + folder/file I/O
+│   │   ├── MarkdownFile.swift      # Identifiable file model
+│   │   └── ViewMode.swift          # .preview / .split / .edit
+│   └── MdReaderQL/                 # Quick Look .appex extension
+│       ├── main.swift              # NSExtensionMain entry point
+│       └── PreviewViewController.swift  # QLPreviewingController
+├── packaging/
+│   ├── Info.plist                  # app bundle plist (+ UTI export for markdown)
+│   └── QLInfo.plist                # .appex plist (NSExtension + QL UTIs)
+├── Makefile                        # `make app` / `make install-ql`
 ├── LICENSE
 └── README.md
 ```

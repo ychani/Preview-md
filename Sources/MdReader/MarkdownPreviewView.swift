@@ -1,4 +1,5 @@
 import AppKit
+import MdReaderCore
 import SwiftUI
 import WebKit
 
@@ -13,7 +14,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
 
-        if let htmlURL = Bundle.module.url(forResource: "preview", withExtension: "html") {
+        if let htmlURL = MdReaderResources.previewHTMLURL {
             let readRoot = htmlURL.deletingLastPathComponent()
             webView.loadFileURL(htmlURL, allowingReadAccessTo: readRoot)
         }
@@ -50,11 +51,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         private func flushRender() {
             guard isLoaded, let webView else { return }
             let markdown = pendingMarkdown
-            guard let data = try? JSONSerialization.data(
-                    withJSONObject: [markdown], options: []),
-                  let jsonArray = String(data: data, encoding: .utf8) else { return }
-            // jsonArray looks like: ["..."], so take the first element safely in JS.
-            let js = "render((\(jsonArray))[0])"
+            guard let js = MarkdownRenderBridge.renderJS(for: markdown) else { return }
             webView.evaluateJavaScript(js, completionHandler: nil)
             lastRendered = markdown
         }
