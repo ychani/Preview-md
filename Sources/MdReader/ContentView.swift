@@ -42,45 +42,11 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbarContent }
+        .navigationTitle("")
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        let typeID = UTType.fileURL.identifier
-        var collected: [(Int, URL)] = []
-        let lock = NSLock()
-        let group = DispatchGroup()
-        var accepted = false
-
-        for (index, provider) in providers.enumerated() {
-            guard provider.hasItemConformingToTypeIdentifier(typeID) else { continue }
-            accepted = true
-            group.enter()
-            provider.loadItem(forTypeIdentifier: typeID, options: nil) { item, _ in
-                defer { group.leave() }
-                let url: URL?
-                switch item {
-                case let u as URL:
-                    url = u
-                case let data as Data:
-                    url = URL(dataRepresentation: data, relativeTo: nil)
-                case let str as String:
-                    url = URL(string: str)
-                default:
-                    url = nil
-                }
-                guard let url else { return }
-                lock.lock()
-                collected.append((index, url))
-                lock.unlock()
-            }
-        }
-
-        group.notify(queue: .main) {
-            let ordered = collected.sorted { $0.0 < $1.0 }.map { $0.1 }
-            guard !ordered.isEmpty else { return }
-            appState.openDroppedFiles(ordered)
-        }
-        return accepted
+        DropHandler.handle(providers, appState: appState)
     }
 
     private var displayFilename: String {
@@ -140,6 +106,7 @@ struct ContentView: View {
 
 struct DetailView: View {
     @EnvironmentObject private var appState: AppState
+    @State private var isDropTargeted = false
 
     var body: some View {
         Group {
@@ -162,6 +129,58 @@ struct DetailView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .onDrop(of: [UTType.fileURL], isTargeted: $isDropTargeted) { providers in
+            DropHandler.handle(providers, appState: appState)
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+}
+
+enum DropHandler {
+    static func handle(_ providers: [NSItemProvider], appState: AppState) -> Bool {
+        let typeID = UTType.fileURL.identifier
+        var collected: [(Int, URL)] = []
+        let lock = NSLock()
+        let group = DispatchGroup()
+        var accepted = false
+
+        for (index, provider) in providers.enumerated() {
+            guard provider.hasItemConformingToTypeIdentifier(typeID) else { continue }
+            accepted = true
+            group.enter()
+            provider.loadItem(forTypeIdentifier: typeID, options: nil) { item, _ in
+                defer { group.leave() }
+                let url: URL?
+                switch item {
+                case let u as URL:
+                    url = u
+                case let data as Data:
+                    url = URL(dataRepresentation: data, relativeTo: nil)
+                case let str as String:
+                    url = URL(string: str)
+                default:
+                    url = nil
+                }
+                guard let url else { return }
+                lock.lock()
+                collected.append((index, url))
+                lock.unlock()
+            }
+        }
+
+        group.notify(queue: .main) {
+            let ordered = collected.sorted { $0.0 < $1.0 }.map { $0.1 }
+            guard !ordered.isEmpty else { return }
+            Task { @MainActor in appState.openDroppedFiles(ordered) }
+        }
+        return accepted
     }
 }
 

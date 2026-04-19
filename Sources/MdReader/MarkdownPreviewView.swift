@@ -18,6 +18,9 @@ struct MarkdownPreviewView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
+        // Let SwiftUI's parent `.onDrop` handle file drops instead of the
+        // webview trying to navigate to the dropped file.
+        webView.unregisterDraggedTypes()
 
         if let htmlURL = MdReaderResources.previewHTMLURL {
             let readRoot = htmlURL.deletingLastPathComponent()
