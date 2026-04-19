@@ -55,10 +55,13 @@ install-ql: app
 	@echo "Registering Quick Look extension..."
 	-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
 		-f "$(USER_APPS)/$(APP_NAME).app" 2>/dev/null || true
+	codesign --sign - --force --entitlements packaging/QL-entitlements.plist \
+		"$(USER_APPS)/$(APP_NAME).app/Contents/PlugIns/$(QL_NAME).appex" 2>/dev/null || true
+	codesign --sign - --force "$(USER_APPS)/$(APP_NAME).app" 2>/dev/null || true
 	-pluginkit -a "$(USER_APPS)/$(APP_NAME).app/Contents/PlugIns/$(QL_NAME).appex" 2>/dev/null || true
 	qlmanage -r >/dev/null 2>&1 || true
 	qlmanage -r cache >/dev/null 2>&1 || true
-	@echo "Done. Open the app once to finish registration, then press Space on a .md file in Finder."
+	@echo "Done. Press Space on a .md file in Finder to test Quick Look."
 
 clean:
 	rm -rf .build $(DIST_DIR)
