@@ -28,5 +28,10 @@ let package = Package(
             dependencies: ["MdReaderCore"],
             path: "Sources/MdReaderQL"
         ),
+        .testTarget(
+            name: "MdReaderCoreTests",
+            dependencies: ["MdReaderCore"],
+            path: "Tests/MdReaderCoreTests"
+        ),
     ]
 )
