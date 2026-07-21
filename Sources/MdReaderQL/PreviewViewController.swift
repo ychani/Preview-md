@@ -1,8 +1,11 @@
 import AppKit
 import Cocoa
 import MdReaderCore
+import os.log
 import Quartz
 import WebKit
+
+private let qlLog = Logger(subsystem: "com.preview-md.app.quicklook", category: "preview")
 
 @objc(PreviewViewController)
 public final class PreviewViewController: NSViewController, QLPreviewingController, WKNavigationDelegate {
@@ -36,11 +39,44 @@ public final class PreviewViewController: NSViewController, QLPreviewingControll
 
     // MARK: - QLPreviewingController
 
+    /// Modern data-based preview (macOS 12+). With QLIsDataBasedPreview set in
+    /// the Info.plist this is the entry point Quick Look actually uses; the
+    /// HTML is rendered by Quick Look itself, with no WebView in this process.
+    public func providePreview(for request: QLFilePreviewRequest) async throws -> QLPreviewReply {
+        let url = request.fileURL
+        qlLog.info("providePreview: \(url.lastPathComponent, privacy: .public)")
+        let markdown = try MarkdownDocumentIO.read(from: url).text
+        let html = try MarkdownHTMLRenderer.renderDocument(
+            markdown: markdown, title: url.lastPathComponent)
+        qlLog.info("providePreview: rendered \(html.count) bytes of HTML")
+        return QLPreviewReply(
+            dataOfContentType: .html,
+            contentSize: CGSize(width: 800, height: 900)
+        ) { reply in
+            reply.title = url.lastPathComponent
+            reply.stringEncoding = .utf8
+            return Data(html.utf8)
+        }
+    }
+
+    /// Legacy view-based preview — kept as a fallback for contexts that do not
+    /// use the data-based path.
     public func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
+        qlLog.info("preparePreviewOfFile: \(url.lastPathComponent, privacy: .public)")
+        // Without the resource bundle the shell can never load and `didFinish`
+        // never fires — fail fast so Quick Look falls back instead of hanging.
+        guard MdReaderResources.previewHTMLURL != nil else {
+            qlLog.error("resource bundle missing — failing preview")
+            handler(NSError(
+                domain: "com.preview-md.app.quicklook", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Preview resources missing from the extension bundle"]))
+            return
+        }
         let markdown: String
         do {
-            markdown = try String(contentsOf: url, encoding: .utf8)
+            markdown = try MarkdownDocumentIO.read(from: url).text
         } catch {
+            qlLog.error("read failed: \(error.localizedDescription, privacy: .public)")
             handler(error)
             return
         }
@@ -54,6 +90,7 @@ public final class PreviewViewController: NSViewController, QLPreviewingControll
     // MARK: - WKNavigationDelegate
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        qlLog.info("shell loaded")
         didLoadShell = true
         flush()
     }
@@ -83,6 +120,11 @@ public final class PreviewViewController: NSViewController, QLPreviewingControll
             return
         }
         webView.evaluateJavaScript(js) { [weak self] _, error in
+            if let error {
+                qlLog.error("render JS failed: \(error.localizedDescription, privacy: .public)")
+            } else {
+                qlLog.info("render complete")
+            }
             self?.pendingCompletion?(error)
             self?.pendingCompletion = nil
             self?.pendingMarkdown = nil

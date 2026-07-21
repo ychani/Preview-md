@@ -22,10 +22,20 @@
     <string>PreviewViewController</string>
     <key>NSExtensionAttributes</key>
     <dict>
+      <key>QLIsDataBasedPreview</key>
+      <true/>
       <key>QLSupportedContentTypes</key>
       <array>
         <string>net.daringfireball.markdown</string>
-        <string>public.plain-text</string>
+        <string>public.markdown</string>
+        <string>com.unknown.md</string>
+        <string>io.typora.markdown</string>
+        <string>net.ia.markdown</string>
+        <string>com.rstudio.rmarkdown</string>
+        <string>org.quarto.qmarkdown</string>
+        <string>dyn.ah62d4rv4ge81e5pe</string>
+        <string>dyn.ah62d4rv4ge8043a</string>
+        <string>dyn.ah62d4rv4ge81c5pe</string>
       </array>
       <key>QLSupportsSearchableItems</key>
       <false/>
