@@ -7,7 +7,6 @@
 <link rel="stylesheet" href="preview.css">
 <script src="marked.min.js"></script>
 <script src="purify.min.js"></script>
-<script src="mermaid.min.js"></script>
 </head>
 <body>
 <article id="content" class="markdown-body"></article>
@@ -16,17 +15,34 @@
     if (window.marked && typeof marked.setOptions === "function") {
       marked.setOptions({ gfm: true, breaks: false });
     }
-    if (window.mermaid && typeof mermaid.initialize === "function") {
-      var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-      try {
-        mermaid.initialize({
-          startOnLoad: false,
-          securityLevel: 'strict',
-          theme: isDark ? 'dark' : 'neutral'
-        });
-      } catch (e) {}
-    }
   })();
+
+  // mermaid.min.js is ~3 MB, so it is injected only for documents that
+  // actually contain a mermaid block.
+  var mermaidLoad = null;
+  function ensureMermaid(callback) {
+    if (window.mermaid) { callback(true); return; }
+    if (!mermaidLoad) {
+      mermaidLoad = new Promise(function (resolve) {
+        var script = document.createElement('script');
+        script.src = 'mermaid.min.js';
+        script.onload = function () {
+          try {
+            var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+            mermaid.initialize({
+              startOnLoad: false,
+              securityLevel: 'strict',
+              theme: isDark ? 'dark' : 'neutral'
+            });
+            resolve(true);
+          } catch (e) { resolve(false); }
+        };
+        script.onerror = function () { resolve(false); };
+        document.head.appendChild(script);
+      });
+    }
+    mermaidLoad.then(callback);
+  }
 
   function transformMermaidBlocks() {
     var blocks = document.querySelectorAll('#content pre > code.language-mermaid');
@@ -41,19 +57,24 @@
   }
 
   function runMermaid() {
-    if (!window.mermaid || typeof mermaid.run !== 'function') return;
     var nodes = document.querySelectorAll('#content .mermaid');
     if (!nodes.length) return;
-    try {
-      mermaid.run({ nodes: nodes });
-    } catch (e) {
-      nodes.forEach(function (n) {
-        if (!n.dataset.processed) {
-          n.textContent = 'Mermaid error: ' + String(e && e.message ? e.message : e);
-          n.classList.add('mermaid-error');
-        }
-      });
-    }
+    ensureMermaid(function (loaded) {
+      if (!loaded || typeof mermaid.run !== 'function') return;
+      // The document may have re-rendered while the script was loading.
+      var current = document.querySelectorAll('#content .mermaid');
+      if (!current.length) return;
+      try {
+        mermaid.run({ nodes: current });
+      } catch (e) {
+        current.forEach(function (n) {
+          if (!n.dataset.processed) {
+            n.textContent = 'Mermaid error: ' + String(e && e.message ? e.message : e);
+            n.classList.add('mermaid-error');
+          }
+        });
+      }
+    });
   }
 
   function extractTOC() {
@@ -96,6 +117,12 @@
         FORBID_TAGS: ['style', 'iframe', 'form', 'object', 'embed'],
         FORBID_ATTR: ['onerror', 'onload', 'onclick']
       });
+    } else {
+      // Fail closed: without the sanitizer, never inject markup — show the
+      // raw markdown as escaped plain text instead.
+      var esc = document.createElement('div');
+      esc.textContent = text;
+      html = '<pre>' + esc.innerHTML + '</pre>';
     }
     el.innerHTML = html;
 

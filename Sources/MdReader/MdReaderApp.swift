@@ -108,6 +108,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Quit guard: ⌘Q with unsaved edits prompts to save/discard instead of
+    /// silently dropping them. Delegate callbacks arrive on the main thread.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let state = _appState else { return .terminateNow }
+        return MainActor.assumeIsolated {
+            guard state.isDirty, let file = state.selectedFile else { return .terminateNow }
+            let alert = NSAlert()
+            alert.messageText = "Save changes to “\(file.name)” before quitting?"
+            alert.informativeText = "Your changes will be lost if you don't save them."
+            alert.addButton(withTitle: "Save and Quit")
+            alert.addButton(withTitle: "Quit Without Saving")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                return state.saveCurrentFile() ? .terminateNow : .terminateCancel
+            case .alertSecondButtonReturn:
+                return .terminateNow
+            default:
+                return .terminateCancel
+            }
+        }
+    }
+
     @MainActor
     private static func deliver(_ urls: [URL], to state: AppState) {
         if urls.count == 1, let url = urls.first {

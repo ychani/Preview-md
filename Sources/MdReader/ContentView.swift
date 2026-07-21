@@ -112,6 +112,8 @@ struct DetailView: View {
         Group {
             if appState.selectedFile == nil {
                 EmptyStateView()
+            } else if let message = appState.loadErrorMessage {
+                LoadErrorView(message: message)
             } else {
                 switch appState.viewMode {
                 case .preview:
@@ -202,6 +204,27 @@ private struct PreviewPane: View {
                     .controlSize(.large)
             }
         }
+    }
+}
+
+private struct LoadErrorView: View {
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 32, weight: .light))
+                .foregroundStyle(.secondary)
+            Text("Can't open this file")
+                .font(.system(size: 15, weight: .medium))
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 

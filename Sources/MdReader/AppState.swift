@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import MdReaderCore
 import UniformTypeIdentifiers
 import WebKit
 
@@ -41,6 +42,24 @@ final class AppState: ObservableObject {
     /// True while a file is being read from disk or while the preview WebView is
     /// rendering it. The preview pane shows a spinner in its place.
     @Published var isLoading: Bool = false
+
+    /// Non-nil when the selected file could not be read or decoded. While set,
+    /// the detail pane shows the error instead of the preview and saving is
+    /// disabled so a failed read can never overwrite the file on disk.
+    @Published var loadErrorMessage: String?
+
+    /// Encoding the current file was decoded with; saves write back in the
+    /// same encoding so opening a Latin-1 file doesn't silently convert it.
+    private var currentEncoding: String.Encoding = .utf8
+
+    /// Modification date of the file as of the last load/save. Used to detect
+    /// external changes before overwriting on ⌘S.
+    private var loadedModificationDate: Date?
+
+    /// Watches the selected file for external writes/renames and reloads the
+    /// content when the in-app copy has no unsaved edits.
+    private var fileWatcher: DispatchSourceFileSystemObject?
+    private var fileWatcherReloadWork: DispatchWorkItem?
 
     /// Up to `kMaxRecents` most-recently-opened files (or folders), newest first.
     @Published var recentURLs: [URL] = []
@@ -174,11 +193,19 @@ final class AppState: ObservableObject {
             if let next = files.first {
                 selectFile(next)
             } else {
-                selectedFile = nil
-                editingContent = ""
-                savedContent = ""
+                clearSelection()
             }
         }
+    }
+
+    private func clearSelection() {
+        selectedFile = nil
+        editingContent = ""
+        savedContent = ""
+        loadErrorMessage = nil
+        loadedModificationDate = nil
+        currentEncoding = .utf8
+        stopWatchingFile()
     }
 
     func toggleSidebar() {
@@ -192,15 +219,17 @@ final class AppState: ObservableObject {
         do {
             let contents = try FileManager.default.contentsOfDirectory(
                 at: url, includingPropertiesForKeys: nil)
+            // Contents are loaded lazily in selectFile — listing a large folder
+            // must not read every file up front.
             files = contents
                 .filter { kMarkdownExtensions.contains($0.pathExtension.lowercased()) }
                 .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
-                .map { fileURL in
-                    let text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
-                    return MarkdownFile(url: fileURL, content: text)
-                }
+                .map { MarkdownFile(url: $0) }
         } catch {
             files = []
+            presentError(
+                title: "Could not open folder",
+                message: "“\(url.lastPathComponent)” could not be read: \(error.localizedDescription)")
         }
         let target: MarkdownFile?
         if let preferred = preferredSelection,
@@ -212,9 +241,7 @@ final class AppState: ObservableObject {
         if let first = target {
             selectFile(first)
         } else {
-            selectedFile = nil
-            editingContent = ""
-            savedContent = ""
+            clearSelection()
         }
     }
 
@@ -225,7 +252,21 @@ final class AppState: ObservableObject {
 
     func selectFile(_ file: MarkdownFile) {
         isLoading = true
-        let text = (try? String(contentsOf: file.url, encoding: .utf8)) ?? file.content
+        loadErrorMessage = nil
+
+        let text: String
+        do {
+            let document = try MarkdownDocumentIO.read(from: file.url)
+            text = document.text
+            currentEncoding = document.encoding
+            loadedModificationDate = modificationDate(of: file.url)
+        } catch {
+            text = ""
+            currentEncoding = .utf8
+            loadedModificationDate = nil
+            loadErrorMessage = error.localizedDescription
+        }
+
         if let idx = files.firstIndex(of: file) {
             files[idx].content = text
             selectedFile = files[idx]
@@ -236,6 +277,13 @@ final class AppState: ObservableObject {
         }
         editingContent = text
         savedContent = text
+        if loadErrorMessage == nil {
+            watchFile(at: file.url)
+        } else {
+            stopWatchingFile()
+            isLoading = false
+            return
+        }
         // isLoading stays true until MarkdownPreviewView reports the render is
         // complete via `markPreviewRendered()`. For the Edit-only view mode there
         // is no preview — flip the flag on the next runloop tick so the spinner
@@ -262,21 +310,149 @@ final class AppState: ObservableObject {
 
     // MARK: – Saving
 
-    func saveCurrentFile() {
-        guard let file = selectedFile else { return }
-        do {
-            try editingContent.write(to: file.url, atomically: true, encoding: .utf8)
-            // Refresh the content in the files array
-            if let idx = files.firstIndex(of: file) {
-                files[idx].content = editingContent
-            }
-            savedContent = editingContent
-        } catch {
+    /// Saves the current file. Returns true when the file was written (used by
+    /// the quit guard to decide whether termination may proceed).
+    @discardableResult
+    func saveCurrentFile() -> Bool {
+        guard let file = selectedFile else { return false }
+        guard loadErrorMessage == nil else { return false }
+
+        // The file changed on disk since we loaded it — don't clobber the
+        // other writer silently.
+        if let loaded = loadedModificationDate,
+           let onDisk = modificationDate(of: file.url),
+           onDisk > loaded {
             let alert = NSAlert()
-            alert.messageText = "Could not save file"
-            alert.informativeText = error.localizedDescription
-            alert.runModal()
+            alert.messageText = "“\(file.name)” has changed on disk"
+            alert.informativeText = "Another application modified this file since you opened it. "
+                + "Overwriting will discard those external changes."
+            alert.addButton(withTitle: "Overwrite")
+            alert.addButton(withTitle: "Reload From Disk")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                break // fall through to the write
+            case .alertSecondButtonReturn:
+                selectFile(file)
+                return false
+            default:
+                return false
+            }
         }
+
+        do {
+            try write(editingContent, to: file.url)
+        } catch {
+            // Most likely cause: content no longer representable in the file's
+            // original encoding (e.g. emoji added to a Latin-1 file).
+            if currentEncoding != .utf8 {
+                let alert = NSAlert()
+                alert.messageText = "Could not save in the file's original encoding"
+                alert.informativeText = "\(error.localizedDescription)\n\nSave as UTF-8 instead?"
+                alert.addButton(withTitle: "Save as UTF-8")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return false }
+                currentEncoding = .utf8
+                do {
+                    try write(editingContent, to: file.url)
+                } catch {
+                    presentError(title: "Could not save file", message: error.localizedDescription)
+                    return false
+                }
+            } else {
+                presentError(title: "Could not save file", message: error.localizedDescription)
+                return false
+            }
+        }
+
+        if let idx = files.firstIndex(of: file) {
+            files[idx].content = editingContent
+        }
+        savedContent = editingContent
+        loadedModificationDate = modificationDate(of: file.url)
+        return true
+    }
+
+    private func write(_ text: String, to url: URL) throws {
+        try text.write(to: url, atomically: true, encoding: currentEncoding)
+    }
+
+    private func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    private func presentError(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.runModal()
+    }
+
+    // MARK: – External change watching
+
+    /// Watches the selected file and reloads it when another process writes to
+    /// it, as long as there are no unsaved in-app edits. Editors that save via
+    /// atomic rename emit `.rename`, so the watch is re-established on the
+    /// path after every event.
+    private func watchFile(at url: URL) {
+        stopWatchingFile()
+        let fd = Darwin.open(url.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .extend, .rename, .delete],
+            queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.scheduleExternalReload(for: url)
+        }
+        source.setCancelHandler { close(fd) }
+        source.resume()
+        fileWatcher = source
+    }
+
+    private func stopWatchingFile() {
+        fileWatcherReloadWork?.cancel()
+        fileWatcherReloadWork = nil
+        fileWatcher?.cancel()
+        fileWatcher = nil
+    }
+
+    /// Debounced: editors commonly emit several events per save.
+    private func scheduleExternalReload(for url: URL) {
+        fileWatcherReloadWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.handleExternalChange(at: url)
+        }
+        fileWatcherReloadWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+
+    private func handleExternalChange(at url: URL) {
+        guard selectedFile?.url.standardizedFileURL == url.standardizedFileURL else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            // Deleted (or mid-rename). Keep the buffer so the user can re-save;
+            // the save path will simply recreate the file.
+            stopWatchingFile()
+            return
+        }
+        // With unsaved edits, don't clobber the buffer — the save-time
+        // conflict check handles the collision instead.
+        guard !isDirty else {
+            watchFile(at: url) // re-arm across atomic renames
+            return
+        }
+        guard let document = try? MarkdownDocumentIO.read(from: url) else { return }
+        currentEncoding = document.encoding
+        loadedModificationDate = modificationDate(of: url)
+        if document.text != savedContent {
+            if let idx = files.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
+                files[idx].content = document.text
+                selectedFile = files[idx]
+            }
+            editingContent = document.text
+            savedContent = document.text
+        }
+        watchFile(at: url)
     }
 
     // MARK: – Bookmark persistence
