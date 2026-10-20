@@ -25,6 +25,60 @@ public enum MarkdownRenderBridge {
         return "setImageBase(\(base));\(render)"
     }
 
+    /// Like `renderJS(for:imageBase:)`, plus wikilink data, sent before the
+    /// render call:
+    ///
+    /// - `setImageRootBase(<string|null>)` — the base that root-relative
+    ///   paths (wikilink `path`s) resolve against for images, e.g.
+    ///   `previewmd-local://<root-token>/`; nil sends `null`.
+    /// - `setWikiLinks(<object|null>)` — `{ "<key>": { "path": "<POSIX path
+    ///   relative to the workspace root containing the target>", "kind":
+    ///   "note" | "image" } }`. Keys are the link target as written inside
+    ///   `[[ ]]` (trimmed, before `#` and `|`); see `WikiLink.lookupKeys` /
+    ///   `WikiLinkIndex.resolutions(in:from:)`. Unresolved targets are absent;
+    ///   `wikiLinks == nil` sends `null` (wikilinks not supported here).
+    ///
+    /// Both calls are guarded (`typeof f === "function"`) so a page without
+    /// them still renders. Output shape:
+    /// `setImageBase(…);<guarded setImageRootBase(…)>;<guarded setWikiLinks(…)>;render(…)`.
+    public static func renderJS(
+        for markdown: String,
+        imageBase: String?,
+        imageRootBase: String? = nil,
+        wikiLinks: [String: WikiLinkResolution]?
+    ) -> String? {
+        guard let render = renderJS(for: markdown),
+              let base = stringOrNullLiteral(imageBase),
+              let rootBase = stringOrNullLiteral(imageRootBase),
+              let links = wikiLinksJSON(wikiLinks) else { return nil }
+        return "setImageBase(\(base));"
+            + guardedCall("setImageRootBase", rootBase) + ";"
+            + guardedCall("setWikiLinks", links) + ";"
+            + render
+    }
+
+    /// A JS expression for `value` (`(["…"])[0]`), or `null` for nil.
+    private static func stringOrNullLiteral(_ value: String?) -> String? {
+        guard let value else { return "null" }
+        return jsonArrayLiteral(value).map { "(\($0))[0]" }
+    }
+
+    /// The `setWikiLinks` argument: a JSON object literal, or `null`.
+    static func wikiLinksJSON(_ wikiLinks: [String: WikiLinkResolution]?) -> String? {
+        guard let wikiLinks else { return "null" }
+        var object: [String: [String: String]] = [:]
+        for (key, resolution) in wikiLinks {
+            object[key] = ["path": resolution.relativePath, "kind": resolution.kind.rawValue]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        return json
+    }
+
+    private static func guardedCall(_ function: String, _ argument: String) -> String {
+        "(typeof \(function)===\"function\"&&\(function)(\(argument)))"
+    }
+
     static func jsonArrayLiteral(_ value: String) -> String? {
         guard let data = try? JSONSerialization.data(
                 withJSONObject: [value], options: []) else { return nil }
