@@ -164,7 +164,8 @@ public enum MarkdownDocumentIO {
 
     /// Files above this size open read-only in the app: editing re-renders
     /// the whole document on every keystroke.
-    public static let largeFileThreshold = 5 * 1024 * 1024
+    /// Decimal so the notice (ByteCountFormatter, file style) reads "5 MB".
+    public static let largeFileThreshold = 5_000_000
 
     /// Size in bytes, or nil if it can't be determined.
     public static func fileSize(of url: URL) -> Int? {
