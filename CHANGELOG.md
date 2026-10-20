@@ -39,6 +39,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
   Anyway), upgrade/uninstall notes for the old Preview-MD, corrected
   Command Line Tools vs. Xcode requirements, license pointer to
   THIRD_PARTY_NOTICES.md.
+- README rewritten for public release: install from GitHub Releases or
+  Homebrew (`brew install --cask ychani/tap/previewmd`), enabling Quick Look,
+  privacy statement, build-from-source and maintainer release steps. Corrects
+  the Quick Look description — previews are rendered statically (no
+  JavaScript, no Mermaid) and never load remote content.
+- Added SECURITY.md (private vulnerability reporting), CONTRIBUTING.md, and
+  CODE_OF_CONDUCT.md (Contributor Covenant 2.1).
+
+### Repository
+- Removed internal planning documents (`docs/PLAN.md`, `docs/DA_FINDINGS.md`)
+  and unused icon concept files; `.claude/` is now git-ignored.
+- GitHub issue forms (bug report, feature request), pull request template, and
+  security contact links.
+- CI now also builds the universal app with `make app` and fails unless the
+  app and Quick Look executables contain both `arm64` and `x86_64`.
+- Draft Homebrew cask (`packaging/homebrew/previewmd.rb`) for the
+  `ychani/homebrew-tap` tap.
 
 ## [0.3.0] — 2026-07-19
 
