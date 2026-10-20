@@ -203,7 +203,9 @@ private struct PreviewPane: View {
                 onRenderComplete: { appState.markPreviewRendered() },
                 onTOCUpdate: { entries in appState.tocEntries = entries },
                 scrollRequest: appState.scrollRequest,
-                onWebViewReady: { webView in appState.previewWebView = webView }
+                onWebViewReady: { webView in appState.previewWebView = webView },
+                documentURL: appState.selectedFile?.url,
+                onOpenLocalFile: { url in appState.open(url: url) }
             )
             if appState.isLoading {
                 Color(nsColor: .textBackgroundColor)

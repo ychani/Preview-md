@@ -102,6 +102,13 @@ struct MdReaderApp: App {
                 Button("Edit") { appState.viewMode = .edit }
                     .keyboardShortcut("3", modifiers: [.command])
                     .disabled(appState.selectedFile == nil)
+                Divider()
+                Button("Zoom In") { PreviewSettings.zoomIn() }
+                    .keyboardShortcut("+", modifiers: [.command])
+                Button("Zoom Out") { PreviewSettings.zoomOut() }
+                    .keyboardShortcut("-", modifiers: [.command])
+                Button("Actual Size") { PreviewSettings.resetZoom() }
+                    .keyboardShortcut("0", modifiers: [.command])
             }
         }
     }
