@@ -5,7 +5,7 @@ import os.log
 import Quartz
 import WebKit
 
-private let qlLog = Logger(subsystem: "com.preview-md.app.quicklook", category: "preview")
+private let qlLog = Logger(subsystem: "com.narnarlabs.previewmd.quicklook", category: "preview")
 
 @objc(PreviewViewController)
 public final class PreviewViewController: NSViewController, QLPreviewingController, WKNavigationDelegate {
@@ -68,7 +68,7 @@ public final class PreviewViewController: NSViewController, QLPreviewingControll
         guard MdReaderResources.previewHTMLURL != nil else {
             qlLog.error("resource bundle missing — failing preview")
             handler(NSError(
-                domain: "com.preview-md.app.quicklook", code: 1,
+                domain: "com.narnarlabs.previewmd.quicklook", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Preview resources missing from the extension bundle"]))
             return
         }
