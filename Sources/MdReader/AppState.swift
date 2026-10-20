@@ -48,9 +48,10 @@ final class AppState: ObservableObject {
     /// disabled so a failed read can never overwrite the file on disk.
     @Published var loadErrorMessage: String?
 
-    /// Encoding the current file was decoded with; saves write back in the
-    /// same encoding so opening a Latin-1 file doesn't silently convert it.
-    private var currentEncoding: String.Encoding = .utf8
+    /// On-disk format (encoding, BOM, line endings) the current file was read
+    /// with; saves write back in the same format so opening a Latin-1 or CRLF
+    /// file doesn't silently convert it.
+    private var currentFormat: MarkdownDocumentIO.Format = .utf8
 
     /// Modification date of the file as of the last load/save. Used to detect
     /// external changes before overwriting on ⌘S.
@@ -212,7 +213,7 @@ final class AppState: ObservableObject {
         savedContent = ""
         loadErrorMessage = nil
         loadedModificationDate = nil
-        currentEncoding = .utf8
+        currentFormat = .utf8
         stopWatchingFile()
     }
 
@@ -292,11 +293,11 @@ final class AppState: ObservableObject {
         do {
             let document = try MarkdownDocumentIO.read(from: file.url)
             text = document.text
-            currentEncoding = document.encoding
+            currentFormat = document.format
             loadedModificationDate = modificationDate(of: file.url)
         } catch {
             text = ""
-            currentEncoding = .utf8
+            currentFormat = .utf8
             loadedModificationDate = nil
             loadErrorMessage = error.localizedDescription
         }
@@ -375,28 +376,28 @@ final class AppState: ObservableObject {
         }
 
         do {
-            try write(editingContent, to: file.url)
-        } catch {
-            // Most likely cause: content no longer representable in the file's
-            // original encoding (e.g. emoji added to a Latin-1 file).
-            if currentEncoding != .utf8 {
-                let alert = NSAlert()
-                alert.messageText = "Could not save in the file's original encoding"
-                alert.informativeText = "\(error.localizedDescription)\n\nSave as UTF-8 instead?"
-                alert.addButton(withTitle: "Save as UTF-8")
-                alert.addButton(withTitle: "Cancel")
-                guard alert.runModal() == .alertFirstButtonReturn else { return false }
-                currentEncoding = .utf8
-                do {
-                    try write(editingContent, to: file.url)
-                } catch {
-                    presentError(title: "Could not save file", message: error.localizedDescription)
-                    return false
-                }
-            } else {
+            try MarkdownDocumentIO.write(editingContent, to: file.url, format: currentFormat)
+        } catch MarkdownDocumentIO.WriteError.unencodable {
+            // Content no longer representable in the file's original encoding
+            // (e.g. emoji added to a Latin-1 file). Line endings are kept.
+            let alert = NSAlert()
+            alert.messageText = "Could not save in the file's original encoding"
+            alert.informativeText = "“\(file.name)” contains characters that can't be represented in "
+                + "\(String.localizedName(of: currentFormat.encoding)).\n\nSave as UTF-8 instead?"
+            alert.addButton(withTitle: "Save as UTF-8")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            let utf8 = MarkdownDocumentIO.Format(encoding: .utf8, lineEnding: currentFormat.lineEnding)
+            do {
+                try MarkdownDocumentIO.write(editingContent, to: file.url, format: utf8)
+                currentFormat = utf8
+            } catch {
                 presentError(title: "Could not save file", message: error.localizedDescription)
                 return false
             }
+        } catch {
+            presentError(title: "Could not save file", message: error.localizedDescription)
+            return false
         }
 
         if let idx = files.firstIndex(of: file) {
@@ -405,10 +406,6 @@ final class AppState: ObservableObject {
         savedContent = editingContent
         loadedModificationDate = modificationDate(of: file.url)
         return true
-    }
-
-    private func write(_ text: String, to url: URL) throws {
-        try text.write(to: url, atomically: true, encoding: currentEncoding)
     }
 
     private func modificationDate(of url: URL) -> Date? {
@@ -476,7 +473,7 @@ final class AppState: ObservableObject {
             return
         }
         guard let document = try? MarkdownDocumentIO.read(from: url) else { return }
-        currentEncoding = document.encoding
+        currentFormat = document.format
         loadedModificationDate = modificationDate(of: url)
         if document.text != savedContent {
             if let idx = files.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
