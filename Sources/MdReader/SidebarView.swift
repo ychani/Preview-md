@@ -81,8 +81,7 @@ struct SidebarView: View {
         .frame(minWidth: 180)
         .alert("Unsaved Changes", isPresented: $showUnsavedAlert) {
             Button("Save", role: .none) {
-                appState.saveCurrentFile()
-                if let f = pendingFile { appState.selectFile(f) }
+                if appState.saveCurrentFile(), let f = pendingFile { appState.selectFile(f) }
                 pendingFile = nil
             }
             Button("Discard", role: .destructive) {

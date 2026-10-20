@@ -119,7 +119,8 @@ final class AppState: ObservableObject {
 
     /// Routes an arbitrary URL (from the open panel, `onOpenURL`, or Finder
     /// double-click of a single file) to the right loader. A single-file open
-    /// hides the sidebar; a folder open shows it.
+    /// hides the sidebar; a folder open shows it. Nothing is recorded (recents,
+    /// bookmark) if the user cancels the unsaved-changes prompt.
     func open(url: URL) {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
@@ -127,23 +128,27 @@ final class AppState: ObservableObject {
             return
         }
         if isDir.boolValue {
+            guard loadFolder(url) else { return }
             saveBookmark(for: url)
-            loadFolder(url)
         } else {
-            openFile(at: url)
+            guard openFile(at: url) else { return }
         }
         addRecent(url)
     }
 
     /// Opens a single Markdown file as the sole entry in the sidebar. Hides the
-    /// sidebar by default — user can reveal it with ⌘⇧L.
-    func openFile(at url: URL) {
+    /// sidebar by default — user can reveal it with ⌘⇧L. Returns false if the
+    /// user cancelled the unsaved-changes prompt.
+    @discardableResult
+    func openFile(at url: URL) -> Bool {
+        guard confirmDiscardIfNeeded() else { return false }
         sidebarMode = .openedFiles
         folderURL = nil
         showSidebar = false
         let file = MarkdownFile(url: url)
         files = [file]
         selectFile(file)
+        return true
     }
 
     /// Adds one or more files to the opened-files list. Used for drag-and-drop
@@ -188,6 +193,9 @@ final class AppState: ObservableObject {
         guard sidebarMode == .openedFiles else { return }
         guard let idx = files.firstIndex(of: file) else { return }
         let wasSelected = selectedFile == file
+        if wasSelected {
+            guard confirmDiscardIfNeeded() else { return }
+        }
         files.remove(at: idx)
         if wasSelected {
             if let next = files.first {
@@ -212,7 +220,10 @@ final class AppState: ObservableObject {
         showSidebar.toggle()
     }
 
-    func loadFolder(_ url: URL, preferredSelection: URL? = nil) {
+    /// Returns false if the user cancelled the unsaved-changes prompt.
+    @discardableResult
+    func loadFolder(_ url: URL, preferredSelection: URL? = nil) -> Bool {
+        guard confirmDiscardIfNeeded() else { return false }
         folderURL = url
         sidebarMode = .folder
         showSidebar = true
@@ -242,6 +253,29 @@ final class AppState: ObservableObject {
             selectFile(first)
         } else {
             clearSelection()
+        }
+        return true
+    }
+
+    /// Gate for anything that replaces the current document (open, folder load,
+    /// remove). Returns true when it is safe to proceed: no unsaved edits, the
+    /// user saved successfully, or chose not to save. The sidebar's own
+    /// switch-file alert calls `selectFile` directly, so it never prompts twice.
+    private func confirmDiscardIfNeeded() -> Bool {
+        guard isDirty, let file = selectedFile else { return true }
+        let alert = NSAlert()
+        alert.messageText = "Do you want to save the changes you made to “\(file.name)”?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            return saveCurrentFile()
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
         }
     }
 
