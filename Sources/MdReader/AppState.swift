@@ -57,10 +57,10 @@ final class AppState: ObservableObject {
     /// external changes before overwriting on ⌘S.
     private var loadedModificationDate: Date?
 
-    /// Watches the selected file for external writes/renames and reloads the
-    /// content when the in-app copy has no unsaved edits.
-    private var fileWatcher: DispatchSourceFileSystemObject?
-    private var fileWatcherReloadWork: DispatchWorkItem?
+    /// Watches the selected file for external writes/renames. Reloads when the
+    /// in-app copy has no unsaved edits; otherwise asks the user.
+    private var fileWatcher: FileWatcher?
+    private var isShowingChangedOnDiskAlert = false
 
     /// Up to `kMaxRecents` most-recently-opened files (or folders), newest first.
     @Published var recentURLs: [URL] = []
@@ -421,63 +421,43 @@ final class AppState: ObservableObject {
 
     // MARK: – External change watching
 
-    /// Watches the selected file and reloads it when another process writes to
-    /// it, as long as there are no unsaved in-app edits. Editors that save via
-    /// atomic rename emit `.rename`, so the watch is re-established on the
-    /// path after every event.
+    /// Watches the selected file for writes by other processes. `FileWatcher`
+    /// follows the path across atomic saves and delete/recreate, so this is
+    /// armed once per selection.
     private func watchFile(at url: URL) {
         stopWatchingFile()
-        let fd = Darwin.open(url.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .extend, .rename, .delete],
-            queue: .main)
-        source.setEventHandler { [weak self] in
-            self?.scheduleExternalReload(for: url)
+        let watcher = FileWatcher(url: url, queue: .main) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.handleExternalChange(event, at: url)
+            }
         }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        fileWatcher = source
+        watcher.start()
+        fileWatcher = watcher
     }
 
     private func stopWatchingFile() {
-        fileWatcherReloadWork?.cancel()
-        fileWatcherReloadWork = nil
-        fileWatcher?.cancel()
+        fileWatcher?.stop()
         fileWatcher = nil
     }
 
-    /// Debounced: editors commonly emit several events per save.
-    private func scheduleExternalReload(for url: URL) {
-        fileWatcherReloadWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.handleExternalChange(at: url)
-        }
-        fileWatcherReloadWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
-    }
-
-    private func handleExternalChange(at url: URL) {
+    private func handleExternalChange(_ event: FileWatcher.Event, at url: URL) {
         guard selectedFile?.url.standardizedFileURL == url.standardizedFileURL else { return }
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            // Deleted (or mid-rename). Keep the buffer so the user can re-save;
-            // the save path will simply recreate the file.
-            stopWatchingFile()
-            return
-        }
-        // With unsaved edits, don't clobber the buffer — the save-time
-        // conflict check handles the collision instead.
-        guard !isDirty else {
-            watchFile(at: url) // re-arm across atomic renames
-            return
-        }
+        // Deleted: keep the buffer so the user can re-save (the save path
+        // recreates the file). The watcher keeps looking for it to reappear.
+        guard event == .modified else { return }
         // Our own save (or a no-op touch): nothing to reload. Re-reading here
         // would also re-run encoding detection on our own bytes.
-        if let loaded = loadedModificationDate, modificationDate(of: url) == loaded {
-            watchFile(at: url)
-            return
+        let onDisk = modificationDate(of: url)
+        if let loaded = loadedModificationDate, onDisk == loaded { return }
+
+        if isDirty {
+            notifyChangedOnDisk(url: url)
+        } else {
+            reloadFromDisk(url: url)
         }
+    }
+
+    private func reloadFromDisk(url: URL) {
         guard let document = try? MarkdownDocumentIO.read(from: url, preferring: currentFormat) else { return }
         currentFormat = document.format
         loadedModificationDate = modificationDate(of: url)
@@ -489,7 +469,40 @@ final class AppState: ObservableObject {
             editingContent = document.text
             savedContent = document.text
         }
-        watchFile(at: url)
+    }
+
+    /// The file changed on disk while the buffer has unsaved edits: ask
+    /// instead of silently keeping (and later clobbering) either version.
+    private func notifyChangedOnDisk(url: URL) {
+        guard !isShowingChangedOnDiskAlert, let file = selectedFile else { return }
+        isShowingChangedOnDiskAlert = true
+        let alert = NSAlert()
+        alert.messageText = "“\(file.name)” changed on disk"
+        alert.informativeText = "Another application modified this file while you have unsaved edits. "
+            + "Reload to discard your edits and show the version on disk, or keep your edits — "
+            + "saving will then overwrite the version on disk."
+        alert.addButton(withTitle: "Keep My Edits")
+        alert.addButton(withTitle: "Reload")
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.isShowingChangedOnDiskAlert = false
+            guard self.selectedFile?.url.standardizedFileURL == url.standardizedFileURL else { return }
+            if response == .alertSecondButtonReturn {
+                self.savedContent = self.editingContent // drop the dirty flag; reload replaces both
+                self.loadedModificationDate = nil
+                self.reloadFromDisk(url: url)
+            } else {
+                // Acknowledged: the next ⌘S overwrites without asking again.
+                self.loadedModificationDate = self.modificationDate(of: url)
+            }
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window) { response in
+                MainActor.assumeIsolated { handle(response) }
+            }
+        } else {
+            handle(alert.runModal())
+        }
     }
 
     // MARK: – Bookmark persistence
