@@ -12,6 +12,12 @@ struct MdReaderApp: App {
         return name.isEmpty ? url.path : name
     }
 
+    /// The opened folder, when the sidebar shows one (relative paths are
+    /// only meaningful inside a folder).
+    private var relativePathRoot: URL? {
+        appState.sidebarMode == .folder ? appState.folderURL : nil
+    }
+
     /// Standard About panel with the bundled third-party notices as Credits.
     private static func showAboutPanel() {
         var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
@@ -84,6 +90,36 @@ struct MdReaderApp: App {
                 }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(!appState.isDirty)
+
+                Divider()
+
+                // ⌥⌘R / ⌥⌘C / ⇧⌥⌘C follow VS Code (Reveal in Finder, Copy
+                // Path, Copy Relative Path); ⌥⌘C is also Finder's "Copy as
+                // Pathname". This app has no Format menu, so ⌥⌘C does not
+                // shadow TextEdit-style "Copy Style".
+                Button("Reveal in Finder") {
+                    if let url = appState.selectedFile?.url {
+                        FileLocationActions.revealInFinder(url)
+                    }
+                }
+                .keyboardShortcut("r", modifiers: [.command, .option])
+                .disabled(appState.selectedFile == nil)
+
+                Button("Copy Path") {
+                    if let url = appState.selectedFile?.url {
+                        FileLocationActions.copyPath(url)
+                    }
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+                .disabled(appState.selectedFile == nil)
+
+                Button("Copy Relative Path") {
+                    if let url = appState.selectedFile?.url, let root = relativePathRoot {
+                        FileLocationActions.copyRelativePath(url, root: root)
+                    }
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option, .shift])
+                .disabled(appState.selectedFile == nil || relativePathRoot == nil)
             }
             CommandGroup(after: .textEditing) {
                 Button(appState.isFindBarVisible ? "Hide Find" : "Find…") {

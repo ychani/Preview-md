@@ -42,18 +42,27 @@ struct ContentView: View {
             }
         }
         .toolbar { toolbarContent }
-        .navigationTitle("")
+        .navigationTitle(displayFilename)
+        .navigationSubtitle(locationSubtitle)
+        .modifier(DocumentProxy(url: appState.selectedFile?.url))
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         DropHandler.handle(providers, appState: appState)
     }
 
+    /// Window title: the selected file's name (extension kept, as in other
+    /// document apps); the app name when nothing is open.
     private var displayFilename: String {
-        guard let name = appState.selectedFile?.name else { return "No file" }
-        if name.hasSuffix(".md") { return String(name.dropLast(3)) }
-        if name.hasSuffix(".markdown") { return String(name.dropLast(9)) }
-        return name
+        appState.selectedFile?.name ?? "PreviewMD"
+    }
+
+    /// Where the selected file lives; empty when no file is selected.
+    private var locationSubtitle: String {
+        guard let url = appState.selectedFile?.url else { return "" }
+        return FileLocationActions.locationSubtitle(
+            for: url,
+            folderRoot: appState.sidebarMode == .folder ? appState.folderURL : nil)
     }
 
     @ToolbarContentBuilder
@@ -70,19 +79,17 @@ struct ContentView: View {
             .disabled(appState.files.isEmpty)
         }
 
-        ToolbarItem(placement: .navigation) {
-            HStack(spacing: 6) {
-                Text(displayFilename)
-                    .font(.headline)
-                    .foregroundStyle(appState.selectedFile == nil ? .secondary : .primary)
-                if appState.isDirty {
-                    Circle()
-                        .fill(.secondary)
-                        .frame(width: 6, height: 6)
-                        .help("Edited")
-                        .accessibilityElement()
-                        .accessibilityLabel("Edited")
-                }
+        // Unsaved-changes marker. The title is a plain SwiftUI window title
+        // (not NSDocument), so macOS shows no "Edited" state of its own.
+        if appState.isDirty {
+            ToolbarItem(placement: .navigation) {
+                Circle()
+                    .fill(.secondary)
+                    .frame(width: 6, height: 6)
+                    .padding(.horizontal, 2)
+                    .help("Edited")
+                    .accessibilityElement()
+                    .accessibilityLabel("Edited")
             }
         }
 
@@ -107,6 +114,21 @@ struct ContentView: View {
             }
             .help(appState.showTOC ? "Hide Table of Contents" : "Show Table of Contents")
             .disabled(appState.selectedFile == nil)
+        }
+    }
+}
+
+/// Attaches the window's document proxy (title-bar icon, drag-out, ⌘-click
+/// path menu) only while a file is selected. Set from a background view so
+/// toggling it never changes the identity of (and rebuilds) the content.
+private struct DocumentProxy: ViewModifier {
+    let url: URL?
+
+    func body(content: Content) -> some View {
+        content.background {
+            if let url {
+                Color.clear.navigationDocument(url)
+            }
         }
     }
 }
