@@ -62,7 +62,9 @@ struct ContentView: View {
             Button {
                 appState.toggleSidebar()
             } label: {
-                Image(systemName: "sidebar.left")
+                Label(appState.showSidebar ? "Hide Sidebar" : "Show Sidebar",
+                      systemImage: "sidebar.left")
+                    .labelStyle(.iconOnly)
             }
             .help(appState.showSidebar ? "Hide Sidebar" : "Show Sidebar")
             .disabled(appState.files.isEmpty)
@@ -77,6 +79,9 @@ struct ContentView: View {
                     Circle()
                         .fill(.secondary)
                         .frame(width: 6, height: 6)
+                        .help("Edited")
+                        .accessibilityElement()
+                        .accessibilityLabel("Edited")
                 }
             }
         }
@@ -96,7 +101,9 @@ struct ContentView: View {
             Button {
                 appState.showTOC.toggle()
             } label: {
-                Image(systemName: "list.bullet.indent")
+                Label(appState.showTOC ? "Hide Table of Contents" : "Show Table of Contents",
+                      systemImage: "list.bullet.indent")
+                    .labelStyle(.iconOnly)
             }
             .help(appState.showTOC ? "Hide Table of Contents" : "Show Table of Contents")
             .disabled(appState.selectedFile == nil)
@@ -215,6 +222,7 @@ private struct LoadErrorView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 32, weight: .light))
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text("Can't open this file")
                 .font(.system(size: 15, weight: .medium))
             Text(message)
@@ -241,6 +249,7 @@ private struct EmptyStateView: View {
                     .font(.system(size: 32, weight: .light))
                     .foregroundStyle(.tertiary)
             }
+            .accessibilityHidden(true)
             VStack(spacing: 6) {
                 Text(appState.folderURL == nil ? "No file open" : "No file selected")
                     .font(.system(size: 15, weight: .medium))

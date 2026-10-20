@@ -27,6 +27,7 @@ struct TOCView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
             }
             .padding(.horizontal, 12)
@@ -41,6 +42,7 @@ struct TOCView: View {
                     Image(systemName: "list.bullet.indent")
                         .font(.title2)
                         .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
                     Text("No headings")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -64,8 +66,11 @@ struct TOCView: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel(entry.text)
+                    .accessibilityHint("Heading level \(entry.level). Scrolls the preview to this heading.")
                 }
                 .listStyle(.sidebar)
+                .accessibilityLabel("Table of Contents")
             }
         }
     }

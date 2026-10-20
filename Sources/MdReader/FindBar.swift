@@ -8,6 +8,7 @@ struct FindBar: View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
 
             TextField("Find", text: Binding(
                 get: { appState.findQuery },
@@ -17,6 +18,10 @@ struct FindBar: View {
             .frame(minWidth: 180, maxWidth: 280)
             .focused($isFieldFocused)
             .onSubmit { appState.findNext() }
+            // Escape while typing closes the bar even if the field editor
+            // consumes the key before the Close button's shortcut sees it.
+            .onExitCommand { appState.hideFindBar() }
+            .accessibilityLabel("Find in Document")
 
             Text(matchLabel)
                 .font(.system(size: 11, design: .monospaced))
@@ -26,7 +31,8 @@ struct FindBar: View {
             Button {
                 appState.findPrev()
             } label: {
-                Image(systemName: "chevron.up")
+                Label("Previous Match", systemImage: "chevron.up")
+                    .labelStyle(.iconOnly)
             }
             .buttonStyle(.borderless)
             .disabled(appState.findMatchCount == 0)
@@ -36,7 +42,8 @@ struct FindBar: View {
             Button {
                 appState.findNext()
             } label: {
-                Image(systemName: "chevron.down")
+                Label("Next Match", systemImage: "chevron.down")
+                    .labelStyle(.iconOnly)
             }
             .buttonStyle(.borderless)
             .disabled(appState.findMatchCount == 0)
@@ -48,7 +55,8 @@ struct FindBar: View {
             Button {
                 appState.hideFindBar()
             } label: {
-                Image(systemName: "xmark.circle.fill")
+                Label("Close Find Bar", systemImage: "xmark.circle.fill")
+                    .labelStyle(.iconOnly)
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
