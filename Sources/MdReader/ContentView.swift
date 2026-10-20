@@ -227,7 +227,14 @@ private struct PreviewPane: View {
                 scrollRequest: appState.scrollRequest,
                 onWebViewReady: { webView in appState.previewWebView = webView },
                 documentURL: appState.selectedFile?.url,
-                onOpenLocalFile: { url in appState.open(url: url) }
+                onOpenLocalFile: { url in appState.openLinkedFile(url) },
+                workspaceRoot: appState.selectedFile.flatMap {
+                    appState.workspaceRoot(containing: $0.url)
+                },
+                wikiLinkIndex: appState.wikiLinkIndex,
+                wikiLinkIndexVersion: appState.wikiLinkIndexVersion,
+                onOpenWikiLink: { url in appState.openLinkedFile(url) },
+                isContentReady: !appState.isReadingFile
             )
             if appState.isLoading {
                 Color(nsColor: .textBackgroundColor)

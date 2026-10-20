@@ -136,6 +136,16 @@ final class AppState: ObservableObject {
     /// file once the roots before it have finished scanning.
     private var pendingInitialSelection = false
 
+    /// Resolves `[[wikilinks]]` across every root's notes and image assets.
+    /// Rebuilt off the main thread (debounced) whenever a root's tree
+    /// changes; nil with no workspace (opened-files mode), where wikilinks
+    /// render as plain links.
+    @Published private(set) var wikiLinkIndex: WikiLinkIndex?
+    /// Bumped whenever `wikiLinkIndex` is replaced (the index itself isn't
+    /// Equatable), so the preview knows to re-resolve its links.
+    private(set) var wikiLinkIndexVersion = 0
+    private var wikiLinkIndexTask: Task<Void, Never>?
+
     /// More than one root: the sidebar shows each as a top-level row.
     var isMultiRoot: Bool { roots.count > 1 }
 
@@ -295,6 +305,29 @@ final class AppState: ObservableObject {
             guard openFile(at: url) else { return }
         }
         addRecent(url)
+    }
+
+    /// Follows a link from the previewed document to another Markdown file
+    /// (a `[[wikilink]]` or a relative `[x](other.md)`). A file inside the
+    /// open workspace is selected there — the workspace stays — after the
+    /// unsaved-changes prompt; anything else goes through `open(url:)`.
+    /// Returns true if `url` is now the selected file.
+    @discardableResult
+    func openLinkedFile(_ url: URL) -> Bool {
+        let canonical = FileNode.canonicalURL(url)
+        if selectedFile.map({ FileNode.canonicalURL($0.url) }) == canonical { return true }
+        if sidebarMode == .folder,
+           let root = workspace.root(containing: url),
+           let treeURL = Self.treeURL(for: url, under: root),
+           Self.canOpen(url, allowingDirectories: false) {
+            guard confirmDiscardIfNeeded() else { return false }
+            hasOpenedDocument = true
+            selectFile(MarkdownFile(url: treeURL))
+            addRecent(url)
+            return true
+        }
+        open(url: url)
+        return selectedFile.map { FileNode.canonicalURL($0.url) } == canonical
     }
 
     /// Opens a single Markdown file as the sole entry in the sidebar. Hides the
@@ -536,6 +569,7 @@ final class AppState: ObservableObject {
         } else {
             rebuildFiles()
         }
+        scheduleWikiLinkIndexRebuild()
         persistWorkspace()
         selectInitialFileIfReady()
     }
@@ -590,6 +624,7 @@ final class AppState: ObservableObject {
         roots = []
         workspace = WorkspaceRoots()
         pendingInitialSelection = false
+        scheduleWikiLinkIndexRebuild()
     }
 
     /// Index in `roots` of the root `session` scans; nil once that root was
@@ -628,6 +663,38 @@ final class AppState: ObservableObject {
         guard tree != roots[index].tree else { return }
         roots[index].tree = tree
         rebuildFiles()
+        scheduleWikiLinkIndexRebuild()
+    }
+
+    /// Rebuilds `wikiLinkIndex` from the current trees off the main thread,
+    /// ~200 ms from now (at once for the first index, so a freshly opened
+    /// workspace doesn't show its links unresolved); a newer call (another
+    /// tree change) supersedes it. Called whenever the set of roots or any
+    /// root's tree changes. With no trees, the index is cleared at once.
+    private func scheduleWikiLinkIndexRebuild() {
+        wikiLinkIndexTask?.cancel()
+        wikiLinkIndexTask = nil
+        let trees = sidebarMode == .folder ? roots.compactMap(\.tree) : []
+        guard !trees.isEmpty else {
+            setWikiLinkIndex(nil)
+            return
+        }
+        let delay: UInt64 = wikiLinkIndex == nil ? 0 : 200_000_000
+        wikiLinkIndexTask = Task { [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+            guard !Task.isCancelled else { return }
+            let index = await Task.detached(priority: .userInitiated) {
+                WikiLinkIndex(trees: trees)
+            }.value
+            guard !Task.isCancelled else { return }
+            self?.setWikiLinkIndex(index)
+        }
+    }
+
+    private func setWikiLinkIndex(_ index: WikiLinkIndex?) {
+        if index == nil, wikiLinkIndex == nil { return }
+        wikiLinkIndexVersion &+= 1
+        wikiLinkIndex = index
     }
 
     /// `files` = every root's files in root order. Same URLs as the trees,

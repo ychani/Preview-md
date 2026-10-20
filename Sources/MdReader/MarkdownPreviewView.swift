@@ -16,6 +16,23 @@ struct MarkdownPreviewView: NSViewRepresentable {
     /// `[x](other.md)`). Nil falls back to asking Launch Services to open the
     /// file with this app.
     var onOpenLocalFile: ((URL) -> Void)?
+    /// The workspace root containing `documentURL`, if any: images (relative
+    /// ones and wikilink embeds) may come from anywhere inside it. Nil serves
+    /// the document's own folder only.
+    var workspaceRoot: URL?
+    /// Resolves `[[wikilinks]]`; nil when there is no workspace (links then
+    /// render as plain links). `wikiLinkIndexVersion` changes whenever the
+    /// index is replaced, so the preview knows to re-resolve.
+    var wikiLinkIndex: WikiLinkIndex?
+    var wikiLinkIndexVersion: Int = 0
+    /// Opens the note a wikilink resolved to. Returns false if nothing was
+    /// opened (e.g. the user cancelled the unsaved-changes prompt). Nil falls
+    /// back to `onOpenLocalFile`.
+    var onOpenWikiLink: ((URL) -> Bool)?
+    /// False while the document's text is still being read (the preview is
+    /// showing a placeholder): a pending wikilink `#heading` scroll waits for
+    /// the real content.
+    var isContentReady: Bool = true
     @AppStorage(PreviewSettings.zoomKey) private var zoom: Double = PreviewSettings.defaultZoom
 
     init(
@@ -25,7 +42,12 @@ struct MarkdownPreviewView: NSViewRepresentable {
         scrollRequest: ScrollRequest? = nil,
         onWebViewReady: ((WKWebView?) -> Void)? = nil,
         documentURL: URL? = nil,
-        onOpenLocalFile: ((URL) -> Void)? = nil
+        onOpenLocalFile: ((URL) -> Void)? = nil,
+        workspaceRoot: URL? = nil,
+        wikiLinkIndex: WikiLinkIndex? = nil,
+        wikiLinkIndexVersion: Int = 0,
+        onOpenWikiLink: ((URL) -> Bool)? = nil,
+        isContentReady: Bool = true
     ) {
         self.markdownText = markdownText
         self.onRenderComplete = onRenderComplete
@@ -34,9 +56,14 @@ struct MarkdownPreviewView: NSViewRepresentable {
         self.onWebViewReady = onWebViewReady
         self.documentURL = documentURL
         self.onOpenLocalFile = onOpenLocalFile
+        self.workspaceRoot = workspaceRoot
+        self.wikiLinkIndex = wikiLinkIndex
+        self.wikiLinkIndexVersion = wikiLinkIndexVersion
+        self.onOpenWikiLink = onOpenWikiLink
+        self.isContentReady = isContentReady
     }
 
-    private static let messageNames = ["tocUpdate", "loadRemoteImages", "openLocalFile"]
+    private static let messageNames = ["tocUpdate", "loadRemoteImages", "openLocalFile", "openWikiLink"]
 
     func makeNSView(context: Context) -> WKWebView {
         let coordinator = context.coordinator
@@ -67,7 +94,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
         coordinator.onTOCUpdate = onTOCUpdate
         coordinator.onWebViewReady = onWebViewReady
         coordinator.onOpenLocalFile = onOpenLocalFile
-        coordinator.setDocument(documentURL)
+        coordinator.onOpenWikiLink = onOpenWikiLink
+        coordinator.setDocument(documentURL, workspaceRoot: workspaceRoot)
+        coordinator.setWikiLinkIndex(wikiLinkIndex, version: wikiLinkIndexVersion)
+        coordinator.isContentReady = isContentReady
         coordinator.loadShell()
         onWebViewReady?(webView)
         return webView
@@ -83,7 +113,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
         coordinator.onTOCUpdate = onTOCUpdate
         coordinator.onWebViewReady = onWebViewReady
         coordinator.onOpenLocalFile = onOpenLocalFile
-        coordinator.setDocument(documentURL)
+        coordinator.onOpenWikiLink = onOpenWikiLink
+        coordinator.setDocument(documentURL, workspaceRoot: workspaceRoot)
+        coordinator.setWikiLinkIndex(wikiLinkIndex, version: wikiLinkIndexVersion)
+        coordinator.isContentReady = isContentReady
         coordinator.revalidateRemoteOptIn(markdown: markdownText)
         coordinator.scheduleRender(markdownText)
         coordinator.handleScrollRequest(scrollRequest)
@@ -105,21 +138,47 @@ struct MarkdownPreviewView: NSViewRepresentable {
         var onTOCUpdate: (([TOCEntry]) -> Void)?
         var onWebViewReady: ((WKWebView?) -> Void)?
         var onOpenLocalFile: ((URL) -> Void)?
+        var onOpenWikiLink: ((URL) -> Bool)?
+        var isContentReady = true
         let imageHandler = LocalImageSchemeHandler()
-        /// What was last sent to `render()`: the text and the image base it
-        /// was rendered with (a different folder must re-render).
+        /// The inputs of a render, compared cheaply to skip redundant ones
+        /// (the wikilink map is derived from them in `flushRender`).
+        private struct RenderInput: Equatable {
+            let markdown: String
+            let documentURL: URL?
+            let bases: LocalImageSchemeHandler.Bases?
+            let wikiLinkIndexVersion: Int?
+        }
+        /// What was last sent to `render()`: the text, the image bases and
+        /// the wikilink map it was rendered with.
         private struct RenderKey: Equatable {
             let markdown: String
-            let imageBase: String?
+            let bases: LocalImageSchemeHandler.Bases?
+            let wikiLinks: [String: WikiLinkResolution]?
         }
+        private var lastInput: RenderInput?
         private var lastRendered: RenderKey?
+        /// Bumped per flush; a map computed off the main thread for an older
+        /// flush is dropped.
+        private var renderSequence = 0
         private var isLoaded = false
         private var debounceItem: DispatchWorkItem?
         private var lastScrollRequestID: UUID?
 
         private var documentURL: URL?
-        /// `previewmd-local://<token>/` for the document's folder, or nil.
-        private var imageBase: String?
+        private var workspaceRoot: URL?
+        /// Image bases for the document (its root and folder), or nil.
+        private var bases: LocalImageSchemeHandler.Bases?
+        private var wikiLinkIndex: WikiLinkIndex?
+        private var wikiLinkIndexVersion = 0
+
+        /// A `#heading` from a clicked `[[note#heading]]`, scrolled to once
+        /// `url`'s real content has rendered.
+        private var pendingHeading: (url: URL, heading: String)?
+
+        /// Documents at least this large (UTF-8 bytes) have their wikilink
+        /// map computed off the main thread (~20 ms per MB).
+        private static let asyncWikiLinkThreshold = 128 * 1024
 
         /// What a remote-images opt-in applies to: the document, or — when the
         /// host passes no `documentURL` — the exact text, so the opt-in can
@@ -137,13 +196,21 @@ struct MarkdownPreviewView: NSViewRepresentable {
 
         // MARK: Document / shell
 
-        func setDocument(_ url: URL?) {
+        func setDocument(_ url: URL?, workspaceRoot root: URL?) {
             let normalized = url?.standardizedFileURL
-            guard normalized != documentURL else { return }
+            guard normalized != documentURL || root != workspaceRoot else { return }
             documentURL = normalized
-            imageBase = normalized.map {
-                imageHandler.register(folder: $0.deletingLastPathComponent())
+            workspaceRoot = root
+            bases = normalized.map { imageHandler.register(documentURL: $0, root: root) }
+            if let pending = pendingHeading,
+               normalized.map(FileNode.canonicalURL) != pending.url {
+                pendingHeading = nil
             }
+        }
+
+        func setWikiLinkIndex(_ index: WikiLinkIndex?, version: Int) {
+            wikiLinkIndex = index
+            wikiLinkIndexVersion = version
         }
 
         private func currentScope(for markdown: String) -> OptInScope {
@@ -166,6 +233,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         func loadShell() {
             guard let webView, let htmlURL = MdReaderResources.previewHTMLURL else { return }
             isLoaded = false
+            lastInput = nil
             lastRendered = nil
             let readRoot = htmlURL.deletingLastPathComponent()
             if remoteImagesAllowed,
@@ -182,8 +250,14 @@ struct MarkdownPreviewView: NSViewRepresentable {
 
         // MARK: Rendering
 
+        private func currentInput(_ markdown: String) -> RenderInput {
+            RenderInput(markdown: markdown, documentURL: documentURL, bases: bases,
+                        wikiLinkIndexVersion: wikiLinkIndex == nil ? nil : wikiLinkIndexVersion)
+        }
+
         func scheduleRender(_ markdown: String) {
-            if RenderKey(markdown: markdown, imageBase: imageBase) == lastRendered { return }
+            let pendingScroll = pendingHeading != nil && isContentReady
+            if currentInput(markdown) == lastInput, !pendingScroll { return }
             pendingMarkdown = markdown
             debounceItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
@@ -194,14 +268,71 @@ struct MarkdownPreviewView: NSViewRepresentable {
         }
 
         private func flushRender() {
-            guard isLoaded, let webView else { return }
-            let key = RenderKey(markdown: pendingMarkdown, imageBase: imageBase)
-            guard let js = MarkdownRenderBridge.renderJS(
-                    for: key.markdown, imageBase: key.imageBase) else { return }
+            guard isLoaded, webView != nil else { return }
+            let input = currentInput(pendingMarkdown)
+            lastInput = input
+            renderSequence &+= 1
+            let sequence = renderSequence
+            let ready = isContentReady
+            guard let index = wikiLinkIndex, let documentURL else {
+                evaluateRender(input, wikiLinks: nil, contentReady: ready, sequence: sequence)
+                return
+            }
+            if input.markdown.utf8.count < Self.asyncWikiLinkThreshold {
+                let map = index.resolutions(in: input.markdown, from: documentURL)
+                evaluateRender(input, wikiLinks: map, contentReady: ready, sequence: sequence)
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let map = index.resolutions(in: input.markdown, from: documentURL)
+                DispatchQueue.main.async {
+                    self?.evaluateRender(input, wikiLinks: map, contentReady: ready, sequence: sequence)
+                }
+            }
+        }
+
+        private func evaluateRender(
+            _ input: RenderInput, wikiLinks: [String: WikiLinkResolution]?,
+            contentReady: Bool, sequence: Int
+        ) {
+            guard sequence == renderSequence, isLoaded, let webView else { return }
+            let key = RenderKey(markdown: input.markdown, bases: input.bases, wikiLinks: wikiLinks)
+            var js = ""
+            if key != lastRendered {
+                guard let render = MarkdownRenderBridge.renderJS(
+                        for: key.markdown, imageBase: key.bases?.imageBase,
+                        imageRootBase: key.bases?.rootBase, wikiLinks: key.wikiLinks) else { return }
+                js = render
+                lastRendered = key
+            }
+            // The heading of a just-followed `[[note#heading]]`, once that
+            // note's real text is on the page.
+            if contentReady, let pending = pendingHeading,
+               input.documentURL.map(FileNode.canonicalURL) == pending.url,
+               let scroll = Self.scrollToHeadingTextJS(pending.heading) {
+                pendingHeading = nil
+                js += js.isEmpty ? scroll : ";" + scroll
+            }
+            guard !js.isEmpty else {
+                onRenderComplete?()
+                return
+            }
             webView.evaluateJavaScript(js) { [weak self] _, _ in
                 self?.onRenderComplete?()
             }
-            lastRendered = key
+        }
+
+        /// JS that scrolls to the heading whose text is `heading`, using the
+        /// page's own GitHub-style slugs (`slugify` / `scrollToFragment` in
+        /// preview.js). For Obsidian's nested `A#B` form the last part wins.
+        private static func scrollToHeadingTextJS(_ heading: String) -> String? {
+            let last = heading.split(separator: "#").last.map(String.init) ?? heading
+            let text = last.trimmingCharacters(in: .whitespaces)
+            guard !text.isEmpty,
+                  let data = try? JSONSerialization.data(withJSONObject: [text], options: []),
+                  let arr = String(data: data, encoding: .utf8) else { return nil }
+            return "(typeof scrollToFragment===\"function\"&&typeof slugify===\"function\""
+                + "&&scrollToFragment(slugify((\(arr))[0])))"
         }
 
         func handleScrollRequest(_ request: ScrollRequest?) {
@@ -272,12 +403,55 @@ struct MarkdownPreviewView: NSViewRepresentable {
                       let target = MarkdownRenderBridge.resolveMarkdownLink(
                         href, documentURL: documentURL) else { return }
                 openLocalFile(target)
+            case "openWikiLink":
+                guard let ref = message.body as? String else { return }
+                openWikiLink(ref)
             case "loadRemoteImages":
                 guard !remoteImagesAllowed else { return }
                 remoteOptIn = currentScope(for: pendingMarkdown)
                 if !shellAllowsRemoteImages { loadShell() }
             default:
                 break
+            }
+        }
+
+        /// Follows a clicked wikilink (`target` or `target#heading`, as
+        /// preview.js posts it): re-resolves it from the current document,
+        /// opens the note (or an image in its default app) and, for a
+        /// heading, scrolls to it once the note has rendered. Unresolved
+        /// links beep.
+        private func openWikiLink(_ ref: String) {
+            guard let documentURL, let link = WikiLink.parse(ref) else { return }
+            guard !link.target.isEmpty else {
+                // `[[#heading]]` — preview.js scrolls these itself.
+                return
+            }
+            guard let resolution = wikiLinkIndex?.resolve(link, from: documentURL) else {
+                NSSound.beep()
+                return
+            }
+            switch resolution.kind {
+            case .image:
+                NSWorkspace.shared.open(resolution.url)
+            case .note:
+                let target = FileNode.canonicalURL(resolution.url)
+                if target == FileNode.canonicalURL(documentURL) {
+                    // A link to this very note: just scroll.
+                    if let heading = link.heading, let js = Self.scrollToHeadingTextJS(heading) {
+                        webView?.evaluateJavaScript(js, completionHandler: nil)
+                    }
+                    return
+                }
+                let opened: Bool
+                if let onOpenWikiLink {
+                    opened = onOpenWikiLink(resolution.url)
+                } else {
+                    openLocalFile(resolution.url)
+                    opened = true
+                }
+                if opened, let heading = link.heading {
+                    pendingHeading = (target, heading)
+                }
             }
         }
 
