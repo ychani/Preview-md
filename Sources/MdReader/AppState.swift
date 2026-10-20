@@ -83,6 +83,38 @@ final class AppState: ObservableObject {
     /// Up to `kMaxRecents` most-recently-opened files (or folders), newest first.
     @Published var recentURLs: [URL] = []
 
+    // MARK: – Folder explorer
+
+    /// The opened folder's tree (folder mode only). `files` is its
+    /// `flatFiles`, in the same display order. Nil while the first scan runs.
+    @Published private(set) var folderTree: FolderTree?
+
+    /// Folders shown expanded in the sidebar tree, by tree URL. Survives live
+    /// updates (a folder that disappears and comes back stays expanded).
+    @Published var expandedFolders: Set<URL> = []
+
+    /// True while the opened folder's first scan is running.
+    @Published private(set) var isScanningFolder: Bool = false
+
+    /// True once the opened folder was deleted, renamed or moved away. The
+    /// last tree (and the open document) stay on screen; updates stop.
+    @Published private(set) var isFolderMissing: Bool = false
+
+    /// Asks the sidebar to scroll a row into view (after auto-reveal).
+    @Published private(set) var revealRequest: RevealRequest?
+
+    struct RevealRequest: Equatable {
+        let id = UUID()
+        let url: URL
+    }
+
+    static let folderScanOptions = FolderScanOptions.default
+
+    private var folderSession: FolderScanSession?
+    /// Started per opened folder; stopped on folder change, when switching to
+    /// opened-files mode, when the root disappears, and on deinit.
+    nonisolated(unsafe) private var folderWatcher: FolderWatcher?
+
     // MARK: – Find state
 
     @Published var isFindBarVisible: Bool = false
@@ -124,21 +156,54 @@ final class AppState: ObservableObject {
         scheduleLastFolderRestore()
     }
 
+    deinit {
+        folderWatcher?.stop()
+    }
+
     // MARK: – Open (file or folder)
 
-    /// Shows an NSOpenPanel that accepts either a `.md`/`.markdown` file or a folder.
+    /// Shows an NSOpenPanel that accepts Markdown files and folders. Several
+    /// files open together in the opened-files list; a folder opens as the
+    /// sidebar tree. A mixed selection opens just the files.
     func openPanel() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.prompt = "Open"
-        panel.message = "Choose a Markdown file or a folder of Markdown files."
+        panel.message = "Choose Markdown files, or a folder of Markdown files."
         panel.allowedContentTypes = MarkdownDocumentIO.markdownExtensions
             .sorted()
             .compactMap { UTType(filenameExtension: $0) }
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        open(url: url)
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        openPanelSelection(panel.urls)
+    }
+
+    /// Routes an open-panel selection: one file replaces the document (as
+    /// before), several files join the opened-files list with the first one
+    /// selected, a lone folder opens as the tree. Folders in a mixed
+    /// selection are ignored.
+    private func openPanelSelection(_ urls: [URL]) {
+        var files: [URL] = []
+        var folders: [URL] = []
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+                continue
+            }
+            if isDirectory.boolValue { folders.append(url) } else { files.append(url) }
+        }
+        switch (files.count, folders.count) {
+        case (0, 0):
+            return
+        case (1, _):
+            open(url: files[0])
+        case (0, _):
+            // Several folders: there is one tree, so open the first.
+            open(url: folders[0])
+        default:
+            openDroppedFiles(files, selectingFirst: true)
+        }
     }
 
     /// The single rule for what PreviewMD opens: an existing Markdown file
@@ -186,6 +251,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func openFile(at url: URL) -> Bool {
         guard confirmDiscardIfNeeded() else { return false }
+        closeFolder()
         sidebarMode = .openedFiles
         folderURL = nil
         showSidebar = false
@@ -197,16 +263,23 @@ final class AppState: ObservableObject {
 
     /// Adds one or more files to the opened-files list. Used for drag-and-drop
     /// onto the window or Dock icon. Preserves existing entries, dedupes by
-    /// standardized URL, and reveals the sidebar.
-    func openDroppedFiles(_ urls: [URL]) {
+    /// standardized URL, and reveals the sidebar. With `selectingFirst` (the
+    /// open panel) the first of `urls` becomes the selection; otherwise only
+    /// an empty selection is filled.
+    func openDroppedFiles(_ urls: [URL], selectingFirst: Bool = false) {
         let markdownURLs = urls
             .filter { Self.canOpen($0, allowingDirectories: false) }
             .map { $0.standardizedFileURL }
         guard !markdownURLs.isEmpty else { return }
+        let switchesSelection = selectingFirst && selectedFile?.url.standardizedFileURL != markdownURLs[0]
+        if switchesSelection {
+            guard confirmDiscardIfNeeded() else { return }
+        }
         hasOpenedDocument = true
 
         // Drops discard any previously-loaded folder context.
         if sidebarMode == .folder {
+            closeFolder()
             files = []
             folderURL = nil
             sidebarMode = .openedFiles
@@ -224,7 +297,9 @@ final class AppState: ObservableObject {
 
         showSidebar = true
 
-        if selectedFile == nil, let target = firstNew ?? files.first {
+        if switchesSelection, let target = files.first(where: { $0.url.standardizedFileURL == markdownURLs[0] }) {
+            selectFile(target)
+        } else if selectedFile == nil, let target = firstNew ?? files.first {
             selectFile(target)
         }
 
@@ -268,41 +343,145 @@ final class AppState: ObservableObject {
         showSidebar.toggle()
     }
 
-    /// Returns false if the user cancelled the unsaved-changes prompt.
+    /// Opens `url` as the sidebar tree. The recursive scan runs off the main
+    /// thread (an iCloud vault can hold thousands of files); the sidebar shows
+    /// a loading state until it lands, then the preferred file — or the first
+    /// one — is selected. Returns false if the user cancelled the
+    /// unsaved-changes prompt.
     @discardableResult
     func loadFolder(_ url: URL, preferredSelection: URL? = nil) -> Bool {
         guard confirmDiscardIfNeeded() else { return false }
+        let root = FileNode.canonicalURL(url)
+        let sameRoot = folderTree?.rootURL == root
+        closeFolder()
+        if !sameRoot { expandedFolders = [] }
         folderURL = url
         sidebarMode = .folder
         showSidebar = true
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: url, includingPropertiesForKeys: nil)
-            // Contents are loaded lazily in selectFile — listing a large folder
-            // must not read every file up front.
-            files = contents
-                .filter { MarkdownDocumentIO.isMarkdownFile($0) }
-                .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
-                .map { MarkdownFile(url: $0) }
-        } catch {
-            files = []
-            presentError(
-                title: "Could not open folder",
-                message: "“\(url.lastPathComponent)” could not be read: \(error.localizedDescription)")
-        }
-        let target: MarkdownFile?
+        files = []
+        isScanningFolder = true
+
+        // A preferred file is known up front: show it while the scan runs.
         if let preferred = preferredSelection,
-           let match = files.first(where: { $0.url.standardizedFileURL == preferred.standardizedFileURL }) {
-            target = match
-        } else {
-            target = files.first
-        }
-        if let first = target {
-            selectFile(first)
+           let treeURL = Self.treeURL(for: preferred, under: root),
+           Self.canOpen(preferred, allowingDirectories: false) {
+            selectFile(MarkdownFile(url: treeURL))
         } else {
             clearSelection()
         }
+
+        let session = FolderScanSession(root: root, options: Self.folderScanOptions) {
+            [weak self] session, update in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.applyFolderUpdate(update, from: session) }
+            }
+        }
+        folderSession = session
+        // Watch before scanning: changes made during the scan are picked up
+        // by a refresh queued behind it.
+        let watcher = FolderWatcher(root: root, queue: .main, latency: 0.3) {
+            [weak self, weak session] event in
+            MainActor.assumeIsolated {
+                guard let self, let session else { return }
+                self.handleFolderEvent(event, from: session)
+            }
+        }
+        if watcher.start() { folderWatcher = watcher }
+        session.startInitialScan()
         return true
+    }
+
+    /// `url` rebuilt from `root` by name, so it equals the tree's own URL
+    /// (tolerates `/private/var` vs `/var`); nil if outside `root`.
+    private static func treeURL(for url: URL, under root: URL) -> URL? {
+        guard let components = FileNode.relativeComponents(of: url, under: root),
+              !components.isEmpty else { return nil }
+        return components.reduce(root) { $0.appendingPathComponent($1, isDirectory: false) }
+    }
+
+    /// Tears down folder mode's tree, watcher and background session.
+    /// Expansion state is left to the caller.
+    private func closeFolder() {
+        folderWatcher?.stop()
+        folderWatcher = nil
+        folderSession?.cancel()
+        folderSession = nil
+        folderTree = nil
+        isScanningFolder = false
+        isFolderMissing = false
+    }
+
+    private func applyFolderUpdate(_ update: FolderScanSession.Update, from session: FolderScanSession) {
+        guard session === folderSession, sidebarMode == .folder else { return }
+        switch update {
+        case .loaded(let tree):
+            isScanningFolder = false
+            publishTree(tree)
+            if let selected = selectedFile {
+                revealInTree(selected.url)
+            } else if let first = Self.initialFile(in: tree) {
+                selectFile(MarkdownFile(url: first))
+            }
+        case .changed(let tree):
+            publishTree(tree)
+        case .failed(let message):
+            isScanningFolder = false
+            folderWatcher?.stop()
+            folderWatcher = nil
+            presentError(
+                title: "Could not open folder",
+                message: "“\(session.root.lastPathComponent)” could not be read: \(message)")
+        }
+    }
+
+    private func publishTree(_ tree: FolderTree) {
+        guard tree != folderTree else { return }
+        folderTree = tree
+        // Same URLs as the tree, so selection tags match sidebar rows.
+        files = tree.flatFiles.map(MarkdownFile.init(url:))
+    }
+
+    /// The file a fresh folder opens on: the first one at the top level
+    /// (a README, typically), else the first in display order.
+    private static func initialFile(in tree: FolderTree) -> URL? {
+        tree.root.children?.first(where: { !$0.isFolder })?.url ?? tree.flatFiles.first
+    }
+
+    private func handleFolderEvent(_ event: FolderWatcher.Event, from session: FolderScanSession) {
+        guard session === folderSession else { return }
+        switch event {
+        case .changed(let directories):
+            session.refresh(directories)
+        case .mustRescanAll:
+            session.rescanAll()
+        case .rootGone:
+            // Keep the last tree and the open document; the single-file
+            // watcher still tracks the document itself.
+            isFolderMissing = true
+            folderWatcher?.stop()
+            folderWatcher = nil
+            session.cancel()
+            folderSession = nil
+        }
+    }
+
+    /// Expands the folders above `url` (folder mode) and asks the sidebar to
+    /// scroll to it.
+    private func revealInTree(_ url: URL) {
+        guard sidebarMode == .folder, let tree = folderTree else { return }
+        let ancestors = tree.ancestors(of: url)
+        if !ancestors.allSatisfy(expandedFolders.contains) {
+            expandedFolders.formUnion(ancestors)
+        }
+        revealRequest = RevealRequest(url: url)
+    }
+
+    func toggleExpanded(_ folder: URL) {
+        if expandedFolders.contains(folder) {
+            expandedFolders.remove(folder)
+        } else {
+            expandedFolders.insert(folder)
+        }
     }
 
     /// Gate for anything that replaces the current document (open, folder load,
@@ -370,6 +549,7 @@ final class AppState: ObservableObject {
         isReadOnly = false
         loadErrorMessage = nil
         selectedFile = files.first(where: { $0 == file }) ?? file
+        revealInTree(file.url)
         // Show the loading state rather than the previous file's text.
         setContent("")
 
@@ -839,5 +1019,134 @@ final class AppState: ObservableObject {
                 self.findCurrentIndex = self.findMatchCount
             }
         }
+    }
+}
+
+// MARK: – Folder scanning
+
+/// The background half of folder mode: owns a working copy of one opened
+/// folder's tree on a private serial queue. Watcher events are coalesced and
+/// applied there (`FolderTree.refresh`), and a new tree is handed to
+/// `publish` only when it actually changed — so our own saves, which touch
+/// the folder but not its listing, never republish.
+///
+/// One session per `loadFolder`; the owner drops results from a session it
+/// no longer holds. `cancel()` stops further work (an in-flight scan still
+/// finishes, but its result is not delivered).
+private final class FolderScanSession: @unchecked Sendable {
+
+    enum Update: Sendable {
+        /// The first scan finished.
+        case loaded(FolderTree)
+        /// A refresh or rescan changed the tree.
+        case changed(FolderTree)
+        /// The root could not be listed.
+        case failed(String)
+    }
+
+    let root: URL
+    let options: FolderScanOptions
+    private let queue: DispatchQueue
+    private let publish: @Sendable (FolderScanSession, Update) -> Void
+
+    /// Confined to `queue`.
+    private var tree: FolderTree?
+
+    private let lock = NSLock()
+    // Guarded by `lock`.
+    private var pendingDirectories: [URL] = []
+    private var pendingRescanAll = false
+    private var drainScheduled = false
+    private var cancelled = false
+
+    init(root: URL, options: FolderScanOptions,
+         publish: @escaping @Sendable (FolderScanSession, Update) -> Void) {
+        self.root = root
+        self.options = options
+        self.publish = publish
+        // Per session, so a slow scan of the previous folder never delays
+        // this one.
+        self.queue = DispatchQueue(label: "PreviewMD.folder-scan", qos: .userInitiated)
+    }
+
+    private var isCancelled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock(); defer { lock.unlock() }
+        cancelled = true
+        pendingDirectories = []
+        pendingRescanAll = false
+    }
+
+    func startInitialScan() {
+        queue.async { [self] in
+            guard !isCancelled else { return }
+            do {
+                _ = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            } catch {
+                deliver(.failed(error.localizedDescription))
+                return
+            }
+            let scanned = FolderTree(scanning: root, options: options)
+            tree = scanned
+            deliver(.loaded(scanned))
+        }
+    }
+
+    func refresh(_ directories: [URL]) {
+        schedule { $0.pendingDirectories.append(contentsOf: directories) }
+    }
+
+    func rescanAll() {
+        schedule { $0.pendingRescanAll = true }
+    }
+
+    private func schedule(_ record: (FolderScanSession) -> Void) {
+        lock.lock()
+        guard !cancelled else { lock.unlock(); return }
+        record(self)
+        let needsDrain = !drainScheduled
+        drainScheduled = true
+        lock.unlock()
+        if needsDrain { queue.async { [self] in drain() } }
+    }
+
+    /// Applies everything recorded since the last drain in one pass.
+    private func drain() {
+        lock.lock()
+        let directories = pendingDirectories
+        let rescanAll = pendingRescanAll
+        pendingDirectories = []
+        pendingRescanAll = false
+        drainScheduled = false
+        let stop = cancelled
+        lock.unlock()
+        guard !stop else { return }
+
+        if rescanAll || tree == nil {
+            let scanned = FolderTree(scanning: root, options: options)
+            guard scanned != tree else { return }
+            let isFirst = tree == nil
+            tree = scanned
+            deliver(isFirst ? .loaded(scanned) : .changed(scanned))
+            return
+        }
+        guard var working = tree else { return }
+        var changed = false
+        var seen: Set<String> = []
+        for directory in directories where seen.insert(directory.path).inserted {
+            if working.refresh(directory: directory, options: options) { changed = true }
+        }
+        guard changed else { return }
+        tree = working
+        deliver(.changed(working))
+    }
+
+    private func deliver(_ update: Update) {
+        guard !isCancelled else { return }
+        publish(self, update)
     }
 }
