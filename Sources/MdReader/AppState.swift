@@ -9,8 +9,6 @@ private let kBookmarkKey = "FolderSecurityBookmark"
 private let kRecentsKey = "RecentFileURLs"
 private let kMaxRecents = 10
 
-private let kMarkdownExtensions: Set<String> = ["md", "markdown"]
-
 /// The sidebar can display one of two populations: the contents of a folder the
 /// user opened, or an ad-hoc list of explicitly-opened files (picker, drag,
 /// Finder double-click).
@@ -33,8 +31,16 @@ final class AppState: ObservableObject {
     /// opens; shown for folder opens and drag-to-open.
     @Published var showSidebar: Bool = false
 
-    // Editable text for the currently open file
-    @Published var editingContent: String = ""
+    // Editable text for the currently open file. Edits are refused while the
+    // file is still being read (they would be overwritten by the read) and
+    // for read-only (large) files.
+    @Published var editingContent: String = "" {
+        didSet {
+            if isReadingFile || isReadOnly, editingContent != savedContent {
+                editingContent = savedContent
+            }
+        }
+    }
 
     // Snapshot of the last-saved (or just-loaded) content; isDirty derives from this
     @Published private var savedContent: String = ""
@@ -43,23 +49,36 @@ final class AppState: ObservableObject {
     /// rendering it. The preview pane shows a spinner in its place.
     @Published var isLoading: Bool = false
 
+    /// True while the selected file's bytes are being read off the main thread.
+    @Published private(set) var isReadingFile: Bool = false
+
+    /// True when the selected file is larger than
+    /// `MarkdownDocumentIO.largeFileThreshold`: it is shown, but editing and
+    /// saving are disabled to keep the app responsive.
+    @Published private(set) var isReadOnly: Bool = false
+
+    /// Bumped on every selection; reads that complete for an older
+    /// generation are dropped so a slow read can't replace a newer selection.
+    private var loadGeneration = 0
+
     /// Non-nil when the selected file could not be read or decoded. While set,
     /// the detail pane shows the error instead of the preview and saving is
     /// disabled so a failed read can never overwrite the file on disk.
     @Published var loadErrorMessage: String?
 
-    /// Encoding the current file was decoded with; saves write back in the
-    /// same encoding so opening a Latin-1 file doesn't silently convert it.
-    private var currentEncoding: String.Encoding = .utf8
+    /// On-disk format (encoding, BOM, line endings) the current file was read
+    /// with; saves write back in the same format so opening a Latin-1 or CRLF
+    /// file doesn't silently convert it.
+    private var currentFormat: MarkdownDocumentIO.Format = .utf8
 
     /// Modification date of the file as of the last load/save. Used to detect
     /// external changes before overwriting on ⌘S.
     private var loadedModificationDate: Date?
 
-    /// Watches the selected file for external writes/renames and reloads the
-    /// content when the in-app copy has no unsaved edits.
-    private var fileWatcher: DispatchSourceFileSystemObject?
-    private var fileWatcherReloadWork: DispatchWorkItem?
+    /// Watches the selected file for external writes/renames. Reloads when the
+    /// in-app copy has no unsaved edits; otherwise asks the user.
+    private var fileWatcher: FileWatcher?
+    private var isShowingChangedOnDiskAlert = false
 
     /// Up to `kMaxRecents` most-recently-opened files (or folders), newest first.
     @Published var recentURLs: [URL] = []
@@ -95,9 +114,14 @@ final class AppState: ObservableObject {
 
     var isDirty: Bool { editingContent != savedContent }
 
+    /// Set by any explicit open (Finder, Dock, panel, recents, drop) so the
+    /// deferred last-folder restore never replaces it.
+    private var hasOpenedDocument = false
+    private var launchObserver: NSObjectProtocol?
+
     init() {
         loadRecents()
-        restoreBookmark()
+        scheduleLastFolderRestore()
     }
 
     // MARK: – Open (file or folder)
@@ -110,11 +134,26 @@ final class AppState: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
         panel.message = "Choose a Markdown file or a folder of Markdown files."
-        var types: [UTType] = [.plainText]
-        if let md = UTType(filenameExtension: "md") { types.insert(md, at: 0) }
-        panel.allowedContentTypes = types
+        panel.allowedContentTypes = MarkdownDocumentIO.markdownExtensions
+            .sorted()
+            .compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         open(url: url)
+    }
+
+    /// The single rule for what PreviewMD opens: an existing Markdown file
+    /// (by extension, see `MarkdownDocumentIO.markdownExtensions`), or — where
+    /// allowed — a folder. Used by `open(url:)` and `openDroppedFiles(_:)`.
+    static func canOpen(_ url: URL, allowingDirectories: Bool) -> Bool {
+        guard url.isFileURL else { return false }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return false
+        }
+        if isDirectory.boolValue {
+            return allowingDirectories
+        }
+        return MarkdownDocumentIO.isMarkdownFile(url)
     }
 
     /// Routes an arbitrary URL (from the open panel, `onOpenURL`, or Finder
@@ -122,9 +161,14 @@ final class AppState: ObservableObject {
     /// hides the sidebar; a folder open shows it. Nothing is recorded (recents,
     /// bookmark) if the user cancels the unsaved-changes prompt.
     func open(url: URL) {
+        hasOpenedDocument = true
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
             removeRecent(url)
+            return
+        }
+        guard Self.canOpen(url, allowingDirectories: true) else {
+            NSSound.beep()
             return
         }
         if isDir.boolValue {
@@ -155,10 +199,11 @@ final class AppState: ObservableObject {
     /// onto the window or Dock icon. Preserves existing entries, dedupes by
     /// standardized URL, and reveals the sidebar.
     func openDroppedFiles(_ urls: [URL]) {
-        let markdownURLs = urls.filter {
-            kMarkdownExtensions.contains($0.pathExtension.lowercased())
-        }
+        let markdownURLs = urls
+            .filter { Self.canOpen($0, allowingDirectories: false) }
+            .map { $0.standardizedFileURL }
         guard !markdownURLs.isEmpty else { return }
+        hasOpenedDocument = true
 
         // Drops discard any previously-loaded folder context.
         if sidebarMode == .folder {
@@ -167,12 +212,12 @@ final class AppState: ObservableObject {
             sidebarMode = .openedFiles
         }
 
-        let existing = Set(files.map { $0.url.standardizedFileURL })
+        // Updated as we go so duplicates within the same drop are skipped too.
+        var seen = Set(files.map { $0.url.standardizedFileURL })
         var firstNew: MarkdownFile?
         for url in markdownURLs {
-            let std = url.standardizedFileURL
-            if existing.contains(std) { continue }
-            let file = MarkdownFile(url: std)
+            guard seen.insert(url).inserted else { continue }
+            let file = MarkdownFile(url: url)
             files.append(file)
             if firstNew == nil { firstNew = file }
         }
@@ -207,12 +252,15 @@ final class AppState: ObservableObject {
     }
 
     private func clearSelection() {
+        loadGeneration &+= 1 // drop any read still in flight
+        isReadingFile = false
+        isReadOnly = false
+        isLoading = false
         selectedFile = nil
-        editingContent = ""
-        savedContent = ""
+        setContent("")
         loadErrorMessage = nil
         loadedModificationDate = nil
-        currentEncoding = .utf8
+        currentFormat = .utf8
         stopWatchingFile()
     }
 
@@ -233,7 +281,7 @@ final class AppState: ObservableObject {
             // Contents are loaded lazily in selectFile — listing a large folder
             // must not read every file up front.
             files = contents
-                .filter { kMarkdownExtensions.contains($0.pathExtension.lowercased()) }
+                .filter { MarkdownDocumentIO.isMarkdownFile($0) }
                 .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
                 .map { MarkdownFile(url: $0) }
         } catch {
@@ -284,61 +332,107 @@ final class AppState: ObservableObject {
 
     // MARK: – File selection
 
-    func selectFile(_ file: MarkdownFile) {
-        isLoading = true
-        loadErrorMessage = nil
+    /// What a background read produced for one file.
+    private struct DiskSnapshot: @unchecked Sendable {
+        let result: Result<MarkdownDocumentIO.Document, Error>
+        let modificationDate: Date?
+        let size: Int?
 
-        let text: String
-        do {
-            let document = try MarkdownDocumentIO.read(from: file.url)
-            text = document.text
-            currentEncoding = document.encoding
-            loadedModificationDate = modificationDate(of: file.url)
-        } catch {
-            text = ""
-            currentEncoding = .utf8
+        var isLarge: Bool { (size ?? 0) > MarkdownDocumentIO.largeFileThreshold }
+    }
+
+    /// Reads off the main thread: an iCloud-evicted file blocks until it is
+    /// downloaded, which must not hang the UI.
+    private nonisolated static func readSnapshot(
+        of url: URL, preferring preferred: MarkdownDocumentIO.Format? = nil
+    ) async -> DiskSnapshot {
+        await Task.detached(priority: .userInitiated) {
+            let result = Result { try MarkdownDocumentIO.read(from: url, preferring: preferred) }
+            return DiskSnapshot(
+                result: result,
+                modificationDate: modificationDate(of: url),
+                size: MarkdownDocumentIO.fileSize(of: url))
+        }.value
+    }
+
+    /// Sets both the editor buffer and the clean snapshot (never dirty).
+    private func setContent(_ text: String) {
+        savedContent = text
+        editingContent = text
+    }
+
+    func selectFile(_ file: MarkdownFile) {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        stopWatchingFile()
+        isLoading = true
+        isReadingFile = true
+        isReadOnly = false
+        loadErrorMessage = nil
+        selectedFile = files.first(where: { $0 == file }) ?? file
+        // Show the loading state rather than the previous file's text.
+        setContent("")
+
+        let url = file.url
+        Task { [weak self] in
+            let snapshot = await Self.readSnapshot(of: url)
+            self?.finishLoading(snapshot, url: url, generation: generation)
+        }
+    }
+
+    private func finishLoading(_ snapshot: DiskSnapshot, url: URL, generation: Int) {
+        // A newer selection started while this read was in flight.
+        guard generation == loadGeneration else { return }
+        isReadingFile = false
+
+        switch snapshot.result {
+        case .success(let document):
+            currentFormat = document.format
+            loadedModificationDate = snapshot.modificationDate
+            isReadOnly = snapshot.isLarge
+            if isReadOnly, viewMode == .edit {
+                // The plain editor is unusable at this size; show the preview.
+                viewMode = .preview
+            }
+            setContent(document.text)
+            if isReadOnly {
+                notifyOpenedReadOnly(name: url.lastPathComponent, size: snapshot.size ?? 0)
+            }
+        case .failure(let error):
+            currentFormat = .utf8
             loadedModificationDate = nil
             loadErrorMessage = error.localizedDescription
-        }
-
-        if let idx = files.firstIndex(of: file) {
-            files[idx].content = text
-            selectedFile = files[idx]
-        } else {
-            var refreshed = file
-            refreshed.content = text
-            selectedFile = refreshed
-        }
-        editingContent = text
-        savedContent = text
-        if loadErrorMessage == nil {
-            watchFile(at: file.url)
-        } else {
-            stopWatchingFile()
+            setContent("")
             isLoading = false
             return
         }
+        watchFile(at: url)
+
         // isLoading stays true until MarkdownPreviewView reports the render is
         // complete via `markPreviewRendered()`. For the Edit-only view mode there
         // is no preview — flip the flag on the next runloop tick so the spinner
         // doesn't get stuck if the user switched modes.
         if viewMode == .edit {
             DispatchQueue.main.async { [weak self] in
-                self?.isLoading = false
+                guard let self, self.loadGeneration == generation else { return }
+                self.isLoading = false
             }
         } else {
             // Safety timeout: if the preview pipeline never calls back (view
             // not mounted yet, navigation stalls, etc.), force-clear so the
             // spinner doesn't strand the UI.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                self?.isLoading = false
+                guard let self, self.loadGeneration == generation else { return }
+                self.isLoading = false
             }
         }
     }
 
     /// Called by `MarkdownPreviewView` once the WebView has finished rendering
-    /// the current markdown text. Clears the loading state.
+    /// the current markdown text. Clears the loading state — unless the file
+    /// is still being read, in which case the render was of the placeholder.
     func markPreviewRendered() {
+        guard !isReadingFile else { return }
         if isLoading { isLoading = false }
     }
 
@@ -349,7 +443,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func saveCurrentFile() -> Bool {
         guard let file = selectedFile else { return false }
-        guard loadErrorMessage == nil else { return false }
+        guard loadErrorMessage == nil, !isReadingFile, !isReadOnly else { return false }
 
         // The file changed on disk since we loaded it — don't clobber the
         // other writer silently.
@@ -375,44 +469,58 @@ final class AppState: ObservableObject {
         }
 
         do {
-            try write(editingContent, to: file.url)
-        } catch {
-            // Most likely cause: content no longer representable in the file's
-            // original encoding (e.g. emoji added to a Latin-1 file).
-            if currentEncoding != .utf8 {
-                let alert = NSAlert()
-                alert.messageText = "Could not save in the file's original encoding"
-                alert.informativeText = "\(error.localizedDescription)\n\nSave as UTF-8 instead?"
-                alert.addButton(withTitle: "Save as UTF-8")
-                alert.addButton(withTitle: "Cancel")
-                guard alert.runModal() == .alertFirstButtonReturn else { return false }
-                currentEncoding = .utf8
-                do {
-                    try write(editingContent, to: file.url)
-                } catch {
-                    presentError(title: "Could not save file", message: error.localizedDescription)
-                    return false
-                }
-            } else {
+            try MarkdownDocumentIO.write(editingContent, to: file.url, format: currentFormat)
+        } catch MarkdownDocumentIO.WriteError.unencodable {
+            // Content no longer representable in the file's original encoding
+            // (e.g. emoji added to a Latin-1 file). Line endings are kept.
+            let alert = NSAlert()
+            alert.messageText = "Could not save in the file's original encoding"
+            alert.informativeText = "“\(file.name)” contains characters that can't be represented in "
+                + "\(String.localizedName(of: currentFormat.encoding)).\n\nSave as UTF-8 instead?"
+            alert.addButton(withTitle: "Save as UTF-8")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            let utf8 = MarkdownDocumentIO.Format(encoding: .utf8, lineEnding: currentFormat.lineEnding)
+            do {
+                try MarkdownDocumentIO.write(editingContent, to: file.url, format: utf8)
+                currentFormat = utf8
+            } catch {
                 presentError(title: "Could not save file", message: error.localizedDescription)
                 return false
             }
+        } catch {
+            presentError(title: "Could not save file", message: error.localizedDescription)
+            return false
         }
 
-        if let idx = files.firstIndex(of: file) {
-            files[idx].content = editingContent
-        }
         savedContent = editingContent
         loadedModificationDate = modificationDate(of: file.url)
         return true
     }
 
-    private func write(_ text: String, to url: URL) throws {
-        try text.write(to: url, atomically: true, encoding: currentEncoding)
+    private func modificationDate(of url: URL) -> Date? {
+        Self.modificationDate(of: url)
     }
 
-    private func modificationDate(of url: URL) -> Date? {
+    private nonisolated static func modificationDate(of url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// Shown once per open of a file above the size limit. A sheet when a
+    /// window is available so it doesn't block the rest of the app.
+    private func notifyOpenedReadOnly(name: String, size: Int) {
+        let alert = NSAlert()
+        alert.messageText = "“\(name)” opened read-only"
+        alert.informativeText = "This file is \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)). "
+            + "Editing and saving are turned off for files over "
+            + "\(ByteCountFormatter.string(fromByteCount: Int64(MarkdownDocumentIO.largeFileThreshold), countStyle: .file)) "
+            + "to keep PreviewMD responsive. Use another editor to change it."
+        alert.alertStyle = .informational
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
     }
 
     private func presentError(title: String, message: String) {
@@ -424,102 +532,161 @@ final class AppState: ObservableObject {
 
     // MARK: – External change watching
 
-    /// Watches the selected file and reloads it when another process writes to
-    /// it, as long as there are no unsaved in-app edits. Editors that save via
-    /// atomic rename emit `.rename`, so the watch is re-established on the
-    /// path after every event.
+    /// Watches the selected file for writes by other processes. `FileWatcher`
+    /// follows the path across atomic saves and delete/recreate, so this is
+    /// armed once per selection.
     private func watchFile(at url: URL) {
         stopWatchingFile()
-        let fd = Darwin.open(url.path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .extend, .rename, .delete],
-            queue: .main)
-        source.setEventHandler { [weak self] in
-            self?.scheduleExternalReload(for: url)
+        let watcher = FileWatcher(url: url, queue: .main) { [weak self] event in
+            MainActor.assumeIsolated {
+                self?.handleExternalChange(event, at: url)
+            }
         }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        fileWatcher = source
+        watcher.start()
+        fileWatcher = watcher
     }
 
     private func stopWatchingFile() {
-        fileWatcherReloadWork?.cancel()
-        fileWatcherReloadWork = nil
-        fileWatcher?.cancel()
+        fileWatcher?.stop()
         fileWatcher = nil
     }
 
-    /// Debounced: editors commonly emit several events per save.
-    private func scheduleExternalReload(for url: URL) {
-        fileWatcherReloadWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            self?.handleExternalChange(at: url)
-        }
-        fileWatcherReloadWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
-    }
-
-    private func handleExternalChange(at url: URL) {
+    private func handleExternalChange(_ event: FileWatcher.Event, at url: URL) {
         guard selectedFile?.url.standardizedFileURL == url.standardizedFileURL else { return }
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            // Deleted (or mid-rename). Keep the buffer so the user can re-save;
-            // the save path will simply recreate the file.
-            stopWatchingFile()
-            return
+        // Deleted: keep the buffer so the user can re-save (the save path
+        // recreates the file). The watcher keeps looking for it to reappear.
+        guard event == .modified else { return }
+        // Our own save (or a no-op touch): nothing to reload. Re-reading here
+        // would also re-run encoding detection on our own bytes.
+        let onDisk = modificationDate(of: url)
+        if let loaded = loadedModificationDate, onDisk == loaded { return }
+
+        if isDirty {
+            notifyChangedOnDisk(url: url)
+        } else {
+            reloadFromDisk(url: url)
         }
-        // With unsaved edits, don't clobber the buffer — the save-time
-        // conflict check handles the collision instead.
-        guard !isDirty else {
-            watchFile(at: url) // re-arm across atomic renames
-            return
-        }
-        guard let document = try? MarkdownDocumentIO.read(from: url) else { return }
-        currentEncoding = document.encoding
-        loadedModificationDate = modificationDate(of: url)
-        if document.text != savedContent {
-            if let idx = files.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
-                files[idx].content = document.text
-                selectedFile = files[idx]
-            }
-            editingContent = document.text
-            savedContent = document.text
-        }
-        watchFile(at: url)
     }
 
-    // MARK: – Bookmark persistence
+    /// Re-reads the selected file in the background and applies it if the
+    /// selection is unchanged and the buffer is still clean.
+    private func reloadFromDisk(url: URL) {
+        let generation = loadGeneration
+        let preferred = currentFormat
+        Task { [weak self] in
+            let snapshot = await Self.readSnapshot(of: url, preferring: preferred)
+            guard let self, generation == self.loadGeneration, !self.isDirty,
+                  case .success(let document) = snapshot.result else { return }
+            self.currentFormat = document.format
+            self.loadedModificationDate = snapshot.modificationDate
+            self.isReadOnly = self.isReadOnly || snapshot.isLarge
+            if document.text != self.savedContent {
+                self.setContent(document.text)
+            }
+        }
+    }
 
+    /// The file changed on disk while the buffer has unsaved edits: ask
+    /// instead of silently keeping (and later clobbering) either version.
+    private func notifyChangedOnDisk(url: URL) {
+        guard !isShowingChangedOnDiskAlert, let file = selectedFile else { return }
+        isShowingChangedOnDiskAlert = true
+        let alert = NSAlert()
+        alert.messageText = "“\(file.name)” changed on disk"
+        alert.informativeText = "Another application modified this file while you have unsaved edits. "
+            + "Reload to discard your edits and show the version on disk, or keep your edits — "
+            + "saving will then overwrite the version on disk."
+        alert.addButton(withTitle: "Keep My Edits")
+        alert.addButton(withTitle: "Reload")
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.isShowingChangedOnDiskAlert = false
+            guard self.selectedFile?.url.standardizedFileURL == url.standardizedFileURL else { return }
+            if response == .alertSecondButtonReturn {
+                self.savedContent = self.editingContent // drop the dirty flag; reload replaces both
+                self.loadedModificationDate = nil
+                self.reloadFromDisk(url: url)
+            } else {
+                // Acknowledged: the next ⌘S overwrites without asking again.
+                self.loadedModificationDate = self.modificationDate(of: url)
+            }
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window) { response in
+                MainActor.assumeIsolated { handle(response) }
+            }
+        } else {
+            handle(alert.runModal())
+        }
+    }
+
+    // MARK: – Last-folder restore
+
+    // The app is not sandboxed, so a plain bookmark (which survives renames
+    // and moves) is all that's needed — no security scope.
     private func saveBookmark(for url: URL) {
-        do {
-            let data = try url.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil)
-            UserDefaults.standard.set(data, forKey: kBookmarkKey)
-        } catch {
-            // Bookmark creation can fail in sandboxed contexts; not fatal
+        guard let data = try? url.bookmarkData(
+            options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        else { return }
+        UserDefaults.standard.set(data, forKey: kBookmarkKey)
+    }
+
+    private func clearBookmark() {
+        UserDefaults.standard.removeObject(forKey: kBookmarkKey)
+    }
+
+    /// Reopens the last folder once launch has finished — but only if launch
+    /// didn't open something itself (Finder double-click, Dock drop, `open`),
+    /// which would otherwise be clobbered or flash the folder first.
+    private func scheduleLastFolderRestore() {
+        guard UserDefaults.standard.data(forKey: kBookmarkKey) != nil else { return }
+        let deferRestore = { [weak self] in
+            // Launch-time opens are delivered asynchronously after the window
+            // appears; give them a beat to land.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated { self?.restoreLastFolderIfIdle() }
+            }
+        }
+        if NSRunningApplication.current.isFinishedLaunching {
+            deferRestore()
+        } else {
+            launchObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didFinishLaunchingNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    if let observer = self?.launchObserver {
+                        NotificationCenter.default.removeObserver(observer)
+                        self?.launchObserver = nil
+                    }
+                }
+                deferRestore()
+            }
         }
     }
 
-    private func restoreBookmark() {
+    private func restoreLastFolderIfIdle() {
+        guard !hasOpenedDocument, selectedFile == nil, files.isEmpty, folderURL == nil else { return }
         guard let data = UserDefaults.standard.data(forKey: kBookmarkKey) else { return }
-        do {
-            var stale = false
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: .withSecurityScope,
-                relativeTo: nil,
-                bookmarkDataIsStale: &stale)
-            guard url.startAccessingSecurityScopedResource() else { return }
-            if stale {
-                saveBookmark(for: url)
-            }
-            loadFolder(url)
-        } catch {
-            UserDefaults.standard.removeObject(forKey: kBookmarkKey)
+        var stale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data, options: [.withoutUI],
+            relativeTo: nil, bookmarkDataIsStale: &stale)
+        else {
+            clearBookmark()
+            return
         }
+        // Gone, not a folder, or unreadable (e.g. permission denied): forget
+        // it quietly instead of alerting on every launch.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) != nil
+        else {
+            clearBookmark()
+            return
+        }
+        if stale { saveBookmark(for: url) }
+        loadFolder(url)
     }
 
     // MARK: – Recent files

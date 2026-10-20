@@ -1,133 +1,96 @@
 import AppKit
-import Cocoa
 import MdReaderCore
 import os.log
 import Quartz
-import WebKit
 
 private let qlLog = Logger(subsystem: "com.narnarlabs.previewmd.quicklook", category: "preview")
 
+/// Quick Look preview provider. QLIsDataBasedPreview is set in QLInfo.plist,
+/// so Quick Look calls `providePreview(for:)` and renders the returned HTML
+/// itself — there is no WebView in this process.
 @objc(PreviewViewController)
-public final class PreviewViewController: NSViewController, QLPreviewingController, WKNavigationDelegate {
+public final class PreviewViewController: NSViewController, QLPreviewingController {
 
-    private var webView: WKWebView!
-    private var pendingMarkdown: String?
-    private var pendingCompletion: ((Error?) -> Void)?
-    private var didLoadShell = false
+    /// Quick Look reads at most this much of a file; the rest is elided with
+    /// a banner so huge files preview quickly and within the memory budget.
+    static let maxPreviewBytes = 2 * 1024 * 1024
 
+    static let truncationBanner = """
+        > **Preview truncated** — showing the first 2 MB of this file. \
+        Open it in PreviewMD to see the whole file.
+
+
+        """
+
+    /// Data-based previews never show this view, but NSViewController must
+    /// not look for a nib named after the class.
     public override func loadView() {
-        let config = WKWebViewConfiguration()
-        config.defaultWebpagePreferences.allowsContentJavaScript = true
-
-        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 800),
-                                configuration: config)
-        webView.navigationDelegate = self
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.autoresizingMask = [.width, .height]
-        self.webView = webView
-
-        let container = NSView(frame: webView.frame)
-        container.autoresizingMask = [.width, .height]
-        container.addSubview(webView)
-        self.view = container
-
-        if let htmlURL = MdReaderResources.previewHTMLURL {
-            let readRoot = htmlURL.deletingLastPathComponent()
-            webView.loadFileURL(htmlURL, allowingReadAccessTo: readRoot)
-        }
+        view = NSView()
     }
 
     // MARK: - QLPreviewingController
 
-    /// Modern data-based preview (macOS 12+). With QLIsDataBasedPreview set in
-    /// the Info.plist this is the entry point Quick Look actually uses; the
-    /// HTML is rendered by Quick Look itself, with no WebView in this process.
     public func providePreview(for request: QLFilePreviewRequest) async throws -> QLPreviewReply {
         let url = request.fileURL
         qlLog.info("providePreview: \(url.lastPathComponent, privacy: .public)")
-        let markdown = try MarkdownDocumentIO.read(from: url).text
-        let html = try MarkdownHTMLRenderer.renderDocument(
-            markdown: markdown, title: url.lastPathComponent)
-        qlLog.info("providePreview: rendered \(html.count) bytes of HTML")
+
+        let html: String
+        do {
+            let (document, isTruncated) = try MarkdownDocumentIO.readPrefix(
+                from: url, maxBytes: Self.maxPreviewBytes)
+            let markdown = isTruncated ? Self.truncationBanner + document.text : document.text
+            html = try MarkdownHTMLRenderer.renderDocument(
+                markdown: markdown, title: url.lastPathComponent)
+        } catch {
+            // Show the reason instead of a blank/failed preview.
+            qlLog.error("preview failed: \(error.localizedDescription, privacy: .public)")
+            html = Self.errorPage(fileName: url.lastPathComponent, message: error.localizedDescription)
+        }
+
+        let data = Data(html.utf8)
+        qlLog.info("providePreview: rendered \(data.count) bytes of HTML")
         return QLPreviewReply(
             dataOfContentType: .html,
             contentSize: CGSize(width: 800, height: 900)
         ) { reply in
             reply.title = url.lastPathComponent
             reply.stringEncoding = .utf8
-            return Data(html.utf8)
+            return data
         }
     }
 
-    /// Legacy view-based preview — kept as a fallback for contexts that do not
-    /// use the data-based path.
-    public func preparePreviewOfFile(at url: URL, completionHandler handler: @escaping (Error?) -> Void) {
-        qlLog.info("preparePreviewOfFile: \(url.lastPathComponent, privacy: .public)")
-        // Without the resource bundle the shell can never load and `didFinish`
-        // never fires — fail fast so Quick Look falls back instead of hanging.
-        guard MdReaderResources.previewHTMLURL != nil else {
-            qlLog.error("resource bundle missing — failing preview")
-            handler(NSError(
-                domain: "com.narnarlabs.previewmd.quicklook", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Preview resources missing from the extension bundle"]))
-            return
-        }
-        let markdown: String
-        do {
-            markdown = try MarkdownDocumentIO.read(from: url).text
-        } catch {
-            qlLog.error("read failed: \(error.localizedDescription, privacy: .public)")
-            handler(error)
-            return
-        }
-        pendingMarkdown = markdown
-        pendingCompletion = handler
-        if didLoadShell {
-            flush()
-        }
+    // MARK: - Error page
+
+    static func errorPage(fileName: String, message: String) -> String {
+        """
+        <!DOCTYPE html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+        <title>\(escapeHTML(fileName))</title>
+        <style>
+          :root { color-scheme: light dark; }
+          body { font: 13px -apple-system, system-ui, sans-serif; margin: 0; height: 100vh;
+                 display: flex; align-items: center; justify-content: center; }
+          main { max-width: 440px; padding: 24px; text-align: center; }
+          h1 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
+          p { margin: 0; opacity: 0.7; line-height: 1.45; }
+        </style>
+        </head>
+        <body><main>
+        <h1>Can’t preview “\(escapeHTML(fileName))”</h1>
+        <p>\(escapeHTML(message))</p>
+        </main></body>
+        </html>
+        """
     }
 
-    // MARK: - WKNavigationDelegate
-
-    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        qlLog.info("shell loaded")
-        didLoadShell = true
-        flush()
-    }
-
-    public func webView(
-        _ webView: WKWebView,
-        decidePolicyFor navigationAction: WKNavigationAction,
-        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-    ) {
-        // Block any navigation away from the preview shell.
-        if let scheme = navigationAction.request.url?.scheme,
-           scheme != "file" && scheme != "about" {
-            decisionHandler(.cancel)
-            return
-        }
-        decisionHandler(.allow)
-    }
-
-    // MARK: - Private
-
-    private func flush() {
-        guard let markdown = pendingMarkdown else { return }
-        guard let js = MarkdownRenderBridge.renderJS(for: markdown) else {
-            pendingCompletion?(nil)
-            pendingCompletion = nil
-            pendingMarkdown = nil
-            return
-        }
-        webView.evaluateJavaScript(js) { [weak self] _, error in
-            if let error {
-                qlLog.error("render JS failed: \(error.localizedDescription, privacy: .public)")
-            } else {
-                qlLog.info("render complete")
-            }
-            self?.pendingCompletion?(error)
-            self?.pendingCompletion = nil
-            self?.pendingMarkdown = nil
-        }
+    private static func escapeHTML(_ text: String) -> String {
+        text.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 }
