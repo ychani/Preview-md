@@ -35,8 +35,12 @@ struct MdReaderApp: App {
                 .onAppear {
                     appDelegate.appState = appState
                 }
+                // SwiftUI delivers a multi-file Finder/Dock open one URL at a
+                // time here (and may hand part of the batch to the delegate
+                // instead), so route every URL through the delegate's
+                // coalescer rather than opening each one on its own.
                 .onOpenURL { url in
-                    appState.open(url: url)
+                    appDelegate.enqueueOpen([url])
                 }
                 // All windows share one AppState, so route Finder / `open -a`
                 // opens to the existing window instead of letting WindowGroup
@@ -103,35 +107,66 @@ struct MdReaderApp: App {
     }
 }
 
-/// NSApplicationDelegate adaptor so we can receive multi-URL Dock drops via
-/// `application(_:open:)` (SwiftUI's `onOpenURL` is called once per URL and
-/// can't tell a burst of drops apart from a single Finder double-click).
+/// NSApplicationDelegate adaptor that owns external open requests (Finder
+/// double-click, `open -a`, Dock drops).
 ///
-/// Dock drops can arrive before the SwiftUI scene has wired `appState` in via
-/// `onAppear`; we buffer pending URLs and flush when the reference lands.
+/// A multi-file open arrives as one Apple Event, but SwiftUI splits it: the
+/// scene's `onOpenURL` gets URLs one at a time and the delegate's
+/// `application(_:open:)` may receive the rest. Both paths feed `enqueueOpen`,
+/// which collects URLs for a short window and then routes the whole batch:
+/// one URL → `AppState.open(url:)`, several → `AppState.openDroppedFiles(_:)`.
+///
+/// Opens can arrive before the SwiftUI scene has wired `appState` in via
+/// `onAppear`; the batch stays pending until the reference lands.
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var pending: [[URL]] = []
+    /// How long to keep collecting after the first URL of a burst. Long
+    /// enough to span SwiftUI's per-URL callbacks, short enough to be
+    /// imperceptible on a single open.
+    private static let coalesceWindow: TimeInterval = 0.15
+
+    private var pendingURLs: [URL] = []
+    private var flushScheduled = false
     private var _appState: AppState?
 
     var appState: AppState? {
         get { _appState }
         set {
             _appState = newValue
-            guard let state = newValue else { return }
-            let batches = pending
-            pending.removeAll()
-            Task { @MainActor in
-                for urls in batches { Self.deliver(urls, to: state) }
-            }
+            if newValue != nil, !pendingURLs.isEmpty { scheduleFlush() }
         }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        if let state = _appState {
-            Task { @MainActor in Self.deliver(urls, to: state) }
-        } else {
-            pending.append(urls)
+        enqueueOpen(urls)
+    }
+
+    /// Adds URLs to the pending batch (deduped by standardized file URL) and
+    /// schedules delivery. Called on the main thread.
+    func enqueueOpen(_ urls: [URL]) {
+        for url in urls {
+            let std = url.standardizedFileURL
+            if !pendingURLs.contains(where: { $0.standardizedFileURL == std }) {
+                pendingURLs.append(url)
+            }
         }
+        scheduleFlush()
+    }
+
+    private func scheduleFlush() {
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.coalesceWindow) { [weak self] in
+            self?.flush()
+        }
+    }
+
+    private func flush() {
+        flushScheduled = false
+        // No AppState yet (cold launch): keep the batch; the setter reschedules.
+        guard let state = _appState, !pendingURLs.isEmpty else { return }
+        let urls = pendingURLs
+        pendingURLs.removeAll()
+        MainActor.assumeIsolated { Self.deliver(urls, to: state) }
     }
 
     /// Quit guard: ⌘Q with unsaved edits prompts to save/discard instead of

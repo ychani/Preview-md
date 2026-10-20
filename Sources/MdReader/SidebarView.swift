@@ -13,6 +13,7 @@ struct SidebarView: View {
                     Image(systemName: "folder.fill")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
                     Text(folder.lastPathComponent)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
@@ -36,6 +37,7 @@ struct SidebarView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Open file or folder…")
+                .accessibilityLabel("Open File or Folder")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -49,12 +51,17 @@ struct SidebarView: View {
                     Image(systemName: "doc.text")
                         .font(.system(size: 28, weight: .light))
                         .foregroundStyle(.quaternary)
+                        .accessibilityHidden(true)
                     Text("No Markdown files")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.tertiary)
                 }
                 Spacer()
             } else {
+                // Selection is the single source of truth for both mouse clicks
+                // and keyboard (arrow-key) navigation. No row-level
+                // onTapGesture: it swallowed clicks and, combined with the
+                // selection setter, could fire attemptSelect twice per click.
                 List(appState.files, selection: Binding(
                     get: { appState.selectedFile?.id },
                     set: { newID in
@@ -66,7 +73,6 @@ struct SidebarView: View {
                 )) { file in
                     FileRowView(file: file, isSelected: appState.selectedFile?.id == file.id)
                         .tag(file.id)
-                        .onTapGesture { attemptSelect(file) }
                         .contextMenu {
                             if appState.sidebarMode == .openedFiles {
                                 Button("Remove from List") {
@@ -121,11 +127,18 @@ private struct FileRowView: View {
             Image(systemName: "doc.text.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .accessibilityHidden(true)
             Text(displayName)
                 .font(.system(size: 13))
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
         .padding(.vertical, 1)
+        .help(file.name)
+        // One element per row, announced by full file name (the visible text
+        // may be extension-stripped or middle-truncated) plus selection state.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(file.name)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
     }
 }
