@@ -22,7 +22,7 @@ public enum MarkdownDocumentIO {
             case .unreadable(let url, let underlying):
                 return "Could not read “\(url.lastPathComponent)”: \(underlying.localizedDescription)"
             case .undecodable(let url):
-                return "“\(url.lastPathComponent)” is not a text file Preview-MD can decode. "
+                return "“\(url.lastPathComponent)” is not a text file PreviewMD can decode. "
                     + "It may be binary or use an unsupported encoding."
             }
         }
