@@ -66,6 +66,8 @@ public enum MarkdownHTMLRenderer {
             throw RenderError.engineUnavailable
         }
         ctx.evaluateScript("marked.setOptions({ gfm: true, breaks: false });")
+        installExtensions(in: ctx)
+        jsError = nil
         ctx.setObject(markdown, forKeyedSubscript: "__mdSource" as NSString)
         let result = ctx.evaluateScript("marked.parse(__mdSource)")
         guard jsError == nil, let html = result?.toString(), !result!.isUndefined else {
@@ -73,6 +75,21 @@ public enum MarkdownHTMLRenderer {
             return "<pre>\(escapeHTML(markdown))</pre>"
         }
         return sanitize(html)
+    }
+
+    /// Front matter tables and `[[wikilinks]]` (as plain spans — Quick Look
+    /// has no navigation) via the same markdown-extensions.js the app uses.
+    /// Best effort: if the script is missing or throws, plain marked output
+    /// is still a correct preview.
+    private static func installExtensions(in ctx: JSContext) {
+        guard let url = MdReaderResources.url(forResource: "markdown-extensions", withExtension: "js"),
+              let source = try? String(contentsOf: url, encoding: .utf8) else { return }
+        ctx.evaluateScript(source)
+        ctx.evaluateScript("""
+            if (typeof PreviewMDExtensions === 'object' && PreviewMDExtensions) {
+              PreviewMDExtensions.install(marked, { mode: 'static' });
+            }
+            """)
     }
 
     /// CSP for the Quick Look document. `default-src 'none'` already covers
