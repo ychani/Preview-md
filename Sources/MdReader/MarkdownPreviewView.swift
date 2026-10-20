@@ -16,6 +16,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
     /// `[x](other.md)`). Nil falls back to asking Launch Services to open the
     /// file with this app.
     var onOpenLocalFile: ((URL) -> Void)?
+    @AppStorage(PreviewSettings.zoomKey) private var zoom: Double = PreviewSettings.defaultZoom
 
     init(
         markdownText: String,
@@ -58,6 +59,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         // Let SwiftUI's parent `.onDrop` handle file drops instead of the
         // webview trying to navigate to the dropped file.
         webView.unregisterDraggedTypes()
+        webView.pageZoom = CGFloat(PreviewSettings.clamp(zoom))
 
         coordinator.webView = webView
         coordinator.pendingMarkdown = markdownText
@@ -72,6 +74,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
+        let pageZoom = CGFloat(PreviewSettings.clamp(zoom))
+        if webView.pageZoom != pageZoom {
+            webView.pageZoom = pageZoom
+        }
         let coordinator = context.coordinator
         coordinator.onRenderComplete = onRenderComplete
         coordinator.onTOCUpdate = onTOCUpdate
