@@ -9,29 +9,45 @@
 
 // mermaid.min.js is ~3 MB, so it is injected only for documents that
 // actually contain a mermaid block.
+//
+// The API object is captured privately once the script has loaded. Never
+// trust `window.mermaid` before that: rendered content can contain
+// `<a id="mermaid">`, and named-element access then makes `window.mermaid`
+// that element (DOM clobbering).
+var mermaidAPI = null;
 var mermaidLoad = null;
-function ensureMermaid(callback) {
-  if (window.mermaid) { callback(true); return; }
+function ensureMermaid() {
+  if (mermaidAPI) return Promise.resolve(mermaidAPI);
   if (!mermaidLoad) {
     mermaidLoad = new Promise(function (resolve) {
       var script = document.createElement('script');
       script.src = 'mermaid.min.js';
       script.onload = function () {
         try {
+          var api = window.mermaid;
+          if (!api || typeof api.initialize !== 'function' ||
+              typeof api.run !== 'function') {
+            resolve(null);
+            return;
+          }
           var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-          mermaid.initialize({
+          api.initialize({
             startOnLoad: false,
             securityLevel: 'strict',
+            // We show our own error block; don't let Mermaid also draw its
+            // "Syntax error" diagram into the page.
+            suppressErrorRendering: true,
             theme: isDark ? 'dark' : 'neutral'
           });
-          resolve(true);
-        } catch (e) { resolve(false); }
+          mermaidAPI = api;
+          resolve(api);
+        } catch (e) { resolve(null); }
       };
-      script.onerror = function () { resolve(false); };
+      script.onerror = function () { resolve(null); };
       document.head.appendChild(script);
     });
   }
-  mermaidLoad.then(callback);
+  return mermaidLoad;
 }
 
 function transformMermaidBlocks() {
@@ -46,24 +62,47 @@ function transformMermaidBlocks() {
   });
 }
 
+function showMermaidError(node, err) {
+  var msg = err && err.message ? err.message : String(err);
+  node.removeAttribute('data-processed');
+  node.textContent = 'Mermaid error: ' + msg;
+  node.classList.add('mermaid-error');
+}
+
+// Bumped on every render(); in-flight diagram work for an older render bails.
+var renderGeneration = 0;
+
 function runMermaid() {
   var nodes = document.querySelectorAll('#content .mermaid');
   if (!nodes.length) return;
-  ensureMermaid(function (loaded) {
-    if (!loaded || typeof mermaid.run !== 'function') return;
+  var generation = renderGeneration;
+  ensureMermaid().then(function (api) {
     // The document may have re-rendered while the script was loading.
+    if (generation !== renderGeneration) return;
     var current = document.querySelectorAll('#content .mermaid');
-    if (!current.length) return;
-    try {
-      mermaid.run({ nodes: current });
-    } catch (e) {
-      current.forEach(function (n) {
-        if (!n.dataset.processed) {
-          n.textContent = 'Mermaid error: ' + String(e && e.message ? e.message : e);
-          n.classList.add('mermaid-error');
-        }
-      });
+    if (!api) {
+      current.forEach(function (n) { showMermaidError(n, 'Mermaid failed to load'); });
+      return;
     }
+    // mermaid.run() is async: render errors arrive as a rejected Promise,
+    // not a synchronous throw. Run one node at a time so a bad diagram only
+    // turns its own block into the error UI.
+    var chain = Promise.resolve();
+    Array.prototype.forEach.call(current, function (node) {
+      chain = chain.then(function () {
+        if (generation !== renderGeneration || !node.isConnected) return;
+        var result;
+        try {
+          result = api.run({ nodes: [node], suppressErrors: false });
+        } catch (e) {
+          showMermaidError(node, e);
+          return;
+        }
+        return Promise.resolve(result).catch(function (e) {
+          if (generation === renderGeneration) showMermaidError(node, e);
+        });
+      });
+    });
   });
 }
 
@@ -94,6 +133,7 @@ function render(md) {
   var el = document.getElementById('content');
   if (!el) return;
   var scrollY = window.scrollY;
+  renderGeneration++;
   var text = typeof md === "string" ? md : String(md == null ? "" : md);
   var html;
   try {
