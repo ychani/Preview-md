@@ -33,8 +33,15 @@ final class AppState: ObservableObject {
     /// opens; shown for folder opens and drag-to-open.
     @Published var showSidebar: Bool = false
 
-    // Editable text for the currently open file
-    @Published var editingContent: String = ""
+    // Editable text for the currently open file. Edits are refused while the
+    // file is still being read (they would be overwritten by the read).
+    @Published var editingContent: String = "" {
+        didSet {
+            if isReadingFile, editingContent != savedContent {
+                editingContent = savedContent
+            }
+        }
+    }
 
     // Snapshot of the last-saved (or just-loaded) content; isDirty derives from this
     @Published private var savedContent: String = ""
@@ -42,6 +49,13 @@ final class AppState: ObservableObject {
     /// True while a file is being read from disk or while the preview WebView is
     /// rendering it. The preview pane shows a spinner in its place.
     @Published var isLoading: Bool = false
+
+    /// True while the selected file's bytes are being read off the main thread.
+    @Published private(set) var isReadingFile: Bool = false
+
+    /// Bumped on every selection; reads that complete for an older
+    /// generation are dropped so a slow read can't replace a newer selection.
+    private var loadGeneration = 0
 
     /// Non-nil when the selected file could not be read or decoded. While set,
     /// the detail pane shows the error instead of the preview and saving is
@@ -208,9 +222,11 @@ final class AppState: ObservableObject {
     }
 
     private func clearSelection() {
+        loadGeneration &+= 1 // drop any read still in flight
+        isReadingFile = false
+        isLoading = false
         selectedFile = nil
-        editingContent = ""
-        savedContent = ""
+        setContent("")
         loadErrorMessage = nil
         loadedModificationDate = nil
         currentFormat = .utf8
@@ -285,61 +301,95 @@ final class AppState: ObservableObject {
 
     // MARK: – File selection
 
-    func selectFile(_ file: MarkdownFile) {
-        isLoading = true
-        loadErrorMessage = nil
+    /// What a background read produced for one file.
+    private struct DiskSnapshot: @unchecked Sendable {
+        let result: Result<MarkdownDocumentIO.Document, Error>
+        let modificationDate: Date?
+    }
 
-        let text: String
-        do {
-            let document = try MarkdownDocumentIO.read(from: file.url)
-            text = document.text
+    /// Reads off the main thread: an iCloud-evicted file blocks until it is
+    /// downloaded, which must not hang the UI.
+    private nonisolated static func readSnapshot(
+        of url: URL, preferring preferred: MarkdownDocumentIO.Format? = nil
+    ) async -> DiskSnapshot {
+        await Task.detached(priority: .userInitiated) {
+            let result = Result { try MarkdownDocumentIO.read(from: url, preferring: preferred) }
+            return DiskSnapshot(result: result, modificationDate: modificationDate(of: url))
+        }.value
+    }
+
+    /// Sets both the editor buffer and the clean snapshot (never dirty).
+    private func setContent(_ text: String) {
+        savedContent = text
+        editingContent = text
+    }
+
+    func selectFile(_ file: MarkdownFile) {
+        loadGeneration &+= 1
+        let generation = loadGeneration
+        stopWatchingFile()
+        isLoading = true
+        isReadingFile = true
+        loadErrorMessage = nil
+        selectedFile = files.first(where: { $0 == file }) ?? file
+        // Show the loading state rather than the previous file's text.
+        setContent("")
+
+        let url = file.url
+        Task { [weak self] in
+            let snapshot = await Self.readSnapshot(of: url)
+            self?.finishLoading(snapshot, url: url, generation: generation)
+        }
+    }
+
+    private func finishLoading(_ snapshot: DiskSnapshot, url: URL, generation: Int) {
+        // A newer selection started while this read was in flight.
+        guard generation == loadGeneration else { return }
+        isReadingFile = false
+
+        switch snapshot.result {
+        case .success(let document):
             currentFormat = document.format
-            loadedModificationDate = modificationDate(of: file.url)
-        } catch {
-            text = ""
+            loadedModificationDate = snapshot.modificationDate
+            if let idx = files.firstIndex(where: { $0.url == url }) {
+                files[idx].content = document.text
+            }
+            setContent(document.text)
+        case .failure(let error):
             currentFormat = .utf8
             loadedModificationDate = nil
             loadErrorMessage = error.localizedDescription
-        }
-
-        if let idx = files.firstIndex(of: file) {
-            files[idx].content = text
-            selectedFile = files[idx]
-        } else {
-            var refreshed = file
-            refreshed.content = text
-            selectedFile = refreshed
-        }
-        editingContent = text
-        savedContent = text
-        if loadErrorMessage == nil {
-            watchFile(at: file.url)
-        } else {
-            stopWatchingFile()
+            setContent("")
             isLoading = false
             return
         }
+        watchFile(at: url)
+
         // isLoading stays true until MarkdownPreviewView reports the render is
         // complete via `markPreviewRendered()`. For the Edit-only view mode there
         // is no preview — flip the flag on the next runloop tick so the spinner
         // doesn't get stuck if the user switched modes.
         if viewMode == .edit {
             DispatchQueue.main.async { [weak self] in
-                self?.isLoading = false
+                guard let self, self.loadGeneration == generation else { return }
+                self.isLoading = false
             }
         } else {
             // Safety timeout: if the preview pipeline never calls back (view
             // not mounted yet, navigation stalls, etc.), force-clear so the
             // spinner doesn't strand the UI.
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                self?.isLoading = false
+                guard let self, self.loadGeneration == generation else { return }
+                self.isLoading = false
             }
         }
     }
 
     /// Called by `MarkdownPreviewView` once the WebView has finished rendering
-    /// the current markdown text. Clears the loading state.
+    /// the current markdown text. Clears the loading state — unless the file
+    /// is still being read, in which case the render was of the placeholder.
     func markPreviewRendered() {
+        guard !isReadingFile else { return }
         if isLoading { isLoading = false }
     }
 
@@ -350,7 +400,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func saveCurrentFile() -> Bool {
         guard let file = selectedFile else { return false }
-        guard loadErrorMessage == nil else { return false }
+        guard loadErrorMessage == nil, !isReadingFile else { return false }
 
         // The file changed on disk since we loaded it — don't clobber the
         // other writer silently.
@@ -409,6 +459,10 @@ final class AppState: ObservableObject {
     }
 
     private func modificationDate(of url: URL) -> Date? {
+        Self.modificationDate(of: url)
+    }
+
+    private nonisolated static func modificationDate(of url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
@@ -457,17 +511,23 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Re-reads the selected file in the background and applies it if the
+    /// selection is unchanged and the buffer is still clean.
     private func reloadFromDisk(url: URL) {
-        guard let document = try? MarkdownDocumentIO.read(from: url, preferring: currentFormat) else { return }
-        currentFormat = document.format
-        loadedModificationDate = modificationDate(of: url)
-        if document.text != savedContent {
-            if let idx = files.firstIndex(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) {
-                files[idx].content = document.text
-                selectedFile = files[idx]
+        let generation = loadGeneration
+        let preferred = currentFormat
+        Task { [weak self] in
+            let snapshot = await Self.readSnapshot(of: url, preferring: preferred)
+            guard let self, generation == self.loadGeneration, !self.isDirty,
+                  case .success(let document) = snapshot.result else { return }
+            self.currentFormat = document.format
+            self.loadedModificationDate = snapshot.modificationDate
+            if document.text != self.savedContent {
+                if let idx = self.files.firstIndex(where: { $0.url == url }) {
+                    self.files[idx].content = document.text
+                }
+                self.setContent(document.text)
             }
-            editingContent = document.text
-            savedContent = document.text
         }
     }
 
