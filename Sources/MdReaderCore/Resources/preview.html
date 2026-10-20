@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:; font-src 'self' data:;">
+<!-- Must match MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: false)
+     exactly: the app swaps it for the remote-images variant after opt-in. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: previewmd-local:; base-uri 'none'; form-action 'none'">
 <title>Preview</title>
 <link rel="stylesheet" href="preview.css">
 <script src="marked.min.js"></script>

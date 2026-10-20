@@ -42,3 +42,120 @@ final class MarkdownRenderBridgeTests: XCTestCase {
         XCTAssertEqual(try roundTrip(""), "")
     }
 }
+
+final class PreviewContentSecurityPolicyTests: XCTestCase {
+
+    private func shippedShell() throws -> String {
+        let url = try XCTUnwrap(MdReaderResources.previewHTMLURL, "preview.html missing from bundle")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    func testStrictPolicyBlocksRemoteAndInlineScript() {
+        let csp = MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: false)
+        XCTAssertTrue(csp.contains("default-src 'none'"))
+        XCTAssertTrue(csp.contains("script-src 'self';"))
+        XCTAssertFalse(csp.contains("unsafe-eval"))
+        XCTAssertFalse(csp.contains("https:"))
+        XCTAssertFalse(csp.contains("file:"))
+        XCTAssertTrue(csp.contains("img-src 'self' data: previewmd-local:;"))
+        XCTAssertTrue(csp.contains("base-uri 'none'"))
+        XCTAssertTrue(csp.contains("form-action 'none'"))
+        // Only style-src may be unsafe-inline (Mermaid injects <style>).
+        XCTAssertEqual(csp.components(separatedBy: "'unsafe-inline'").count, 2)
+        XCTAssertTrue(csp.contains("style-src 'self' 'unsafe-inline'"))
+    }
+
+    func testOptInPolicyAddsHttpsToImagesOnly() {
+        let csp = MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: true)
+        XCTAssertTrue(csp.contains("img-src 'self' data: previewmd-local: https:;"))
+        XCTAssertEqual(csp.components(separatedBy: "https:").count, 2, "https: must appear only in img-src")
+        XCTAssertFalse(csp.contains("http:"))
+    }
+
+    func testShippedShellCarriesStrictPolicyAndNoInlineScript() throws {
+        let html = try shippedShell()
+        XCTAssertTrue(html.contains(MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: false)))
+        XCTAssertFalse(html.contains("<script>"), "inline scripts are blocked by CSP; use preview.js")
+        XCTAssertTrue(html.contains(#"<script src="preview.js"></script>"#))
+    }
+
+    func testShellTemplating() throws {
+        let html = try shippedShell()
+        XCTAssertEqual(MarkdownRenderBridge.previewShellHTML(template: html, allowRemoteImages: false), html)
+        let remote = try XCTUnwrap(MarkdownRenderBridge.previewShellHTML(template: html, allowRemoteImages: true))
+        XCTAssertTrue(remote.contains(MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: true)))
+        XCTAssertFalse(remote.contains(MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: false) + "\""))
+    }
+
+    func testShellTemplatingFailsClosedOnUnknownPolicy() {
+        let html = #"<meta http-equiv="Content-Security-Policy" content="default-src *">"#
+        XCTAssertNil(MarkdownRenderBridge.previewShellHTML(template: html, allowRemoteImages: true))
+        XCTAssertNil(MarkdownRenderBridge.previewShellHTML(template: html, allowRemoteImages: false))
+    }
+}
+
+final class LocalImageResolutionTests: XCTestCase {
+    private var root: URL!
+    private var docs: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("previewmd-img-\(UUID().uuidString)", isDirectory: true)
+        docs = root.appendingPathComponent("docs", isDirectory: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: docs.appendingPathComponent("img sub"), withIntermediateDirectories: true)
+        try Data([0x89, 0x50]).write(to: docs.appendingPathComponent("a.png"))
+        try Data([0x89, 0x50]).write(to: docs.appendingPathComponent("img sub/b.JPG"))
+        try Data("secret".utf8).write(to: docs.appendingPathComponent("secret.txt"))
+        try Data("outside".utf8).write(to: root.appendingPathComponent("outside.png"))
+        // Symlinks: one escaping the folder, one disguising a text file,
+        // one harmlessly pointing at an image inside the folder.
+        try fm.createSymbolicLink(at: docs.appendingPathComponent("escape.png"),
+                                  withDestinationURL: root.appendingPathComponent("outside.png"))
+        try fm.createSymbolicLink(at: docs.appendingPathComponent("fake.png"),
+                                  withDestinationURL: docs.appendingPathComponent("secret.txt"))
+        try fm.createSymbolicLink(at: docs.appendingPathComponent("inside.png"),
+                                  withDestinationURL: docs.appendingPathComponent("a.png"))
+        try fm.createDirectory(at: docs.appendingPathComponent("dir.png"), withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func resolve(_ s: String) -> (fileURL: URL, mimeType: String)? {
+        guard let url = URL(string: s) else { return nil }
+        return MarkdownRenderBridge.resolveLocalImage(url, documentFolder: docs)
+    }
+
+    func testServesImagesInsideFolder() throws {
+        let a = try XCTUnwrap(resolve("previewmd-local://d1/a.png"))
+        XCTAssertEqual(a.mimeType, "image/png")
+        XCTAssertEqual(a.fileURL.lastPathComponent, "a.png")
+        let b = try XCTUnwrap(resolve("previewmd-local://d1/img%20sub/b.JPG"))
+        XCTAssertEqual(b.mimeType, "image/jpeg")
+        XCTAssertNotNil(resolve("previewmd-local://d1/inside.png"), "symlink within the folder is fine")
+    }
+
+    func testRejectsTraversal() {
+        XCTAssertNil(resolve("previewmd-local://d1/../outside.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/..%2Foutside.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/img%20sub/..%2F..%2Foutside.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/./a.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/../../../../etc/passwd"))
+    }
+
+    func testRejectsSymlinkEscapesAndDisguises() {
+        XCTAssertNil(resolve("previewmd-local://d1/escape.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/fake.png"))
+    }
+
+    func testRejectsNonImagesDirectoriesAndMissing() {
+        XCTAssertNil(resolve("previewmd-local://d1/secret.txt"))
+        XCTAssertNil(resolve("previewmd-local://d1/dir.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/missing.png"))
+        XCTAssertNil(resolve("previewmd-local://d1/"))
+        XCTAssertNil(resolve("file:///etc/hosts"))
+        XCTAssertNil(resolve("https://example.com/a.png"))
+    }
+}
