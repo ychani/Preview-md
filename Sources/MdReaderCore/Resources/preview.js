@@ -115,9 +115,15 @@ var remoteRefCount = 0;
 // which serves image files from the document's folder only (validated again
 // in Swift). Set by the app before each render; null in Quick Look or when
 // there is no document file, in which case relative images stay blocked.
+//
+// The base is `previewmd-local://<token>/` plus, optionally, the document's
+// folder below the served root (`notes/sub/`, percent-encoded). Relative
+// srcs resolve against that folder and may climb with ../ up to — never
+// above — the root.
+var LOCAL_BASE = /^(previewmd-local:\/\/[a-z0-9-]+\/)((?:[^\/?#\\]+\/)*)$/;
 var imageBase = null;
 function setImageBase(base) {
-  imageBase = (typeof base === 'string' && /^previewmd-local:\/\/[a-z0-9-]+\/$/.test(base)) ? base : null;
+  imageBase = (typeof base === 'string' && LOCAL_BASE.test(base)) ? base : null;
 }
 window.setImageBase = setImageBase;
 
@@ -132,17 +138,19 @@ function isRelativeURL(s) {
   return !/^[a-z][a-z0-9+.\-]*:/i.test(s) && !/^[\/\\#]/.test(s);
 }
 
-// Resolve against a sentinel root; if the result leaves it, the path used
-// ../ to climb out of the document folder and is refused.
+// Resolve against a sentinel root (plus the base's folder path); if the
+// result leaves it, the path used ../ to climb out of the served root and is
+// refused.
 var LOCAL_PROBE_ROOT = '/__previewmd_root__/';
 function localImageURL(src, base) {
-  if (!base) return null;
+  var m = base ? LOCAL_BASE.exec(base) : null;
+  if (!m) return null;
   var u;
-  try { u = new URL(src, 'previewmd-local://probe' + LOCAL_PROBE_ROOT); } catch (e) { return null; }
+  try { u = new URL(src, 'previewmd-local://probe' + LOCAL_PROBE_ROOT + m[2]); } catch (e) { return null; }
   if (u.protocol !== 'previewmd-local:' || u.host !== 'probe') return null;
   if (u.pathname.indexOf(LOCAL_PROBE_ROOT) !== 0) return null;
   var rel = u.pathname.slice(LOCAL_PROBE_ROOT.length);
-  return rel ? base + rel : null;
+  return rel ? m[1] + rel : null;
 }
 
 function rewriteLocalImage(node) {
