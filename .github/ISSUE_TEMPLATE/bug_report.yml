@@ -1,0 +1,67 @@
+name: Bug report
+description: Something in PreviewMD or its Quick Look preview doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security issues go through [SECURITY.md](https://github.com/ychani/Preview-md/blob/develop/SECURITY.md), not here.
+  - type: input
+    id: previewmd-version
+    attributes:
+      label: PreviewMD version
+      description: PreviewMD → About PreviewMD (e.g. 0.3.0)
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Apple menu → About This Mac (include Apple silicon or Intel)
+      placeholder: "macOS 15.1 (Apple silicon)"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install PreviewMD?
+      options:
+        - GitHub Releases DMG
+        - Homebrew
+        - Built from source
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where does it happen?
+      options:
+        - App
+        - Quick Look preview (Space in Finder)
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: If a specific document triggers it, paste a minimal Markdown snippet (remove anything private).
+      placeholder: |
+        1. Open a file containing ...
+        2. Switch to Split view
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, Console.app messages, etc.

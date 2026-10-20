@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement to PreviewMD
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe what you're trying to do and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like PreviewMD to do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you've tried
+  - type: input
+    id: previewmd-version
+    attributes:
+      label: PreviewMD version
+      description: PreviewMD → About PreviewMD
+      placeholder: "0.3.0"
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "macOS 15.1"

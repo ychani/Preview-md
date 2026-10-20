@@ -10,9 +10,27 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # make app derives CFBundleVersion from the commit count
       - name: Swift version
         run: swift --version
       - name: Build (release)
         run: swift build -c release
       - name: Test
         run: swift test
+      - name: Build universal app
+        run: make app
+      - name: Check universal binaries
+        run: |
+          set -euo pipefail
+          for bin in dist/PreviewMD.app/Contents/MacOS/PreviewMD \
+                     dist/PreviewMD.app/Contents/PlugIns/PreviewMD-QL.appex/Contents/MacOS/PreviewMD-QL; do
+            archs=$(lipo -archs "$bin")
+            echo "$bin: $archs"
+            for arch in x86_64 arm64; do
+              case " $archs " in
+                *" $arch "*) ;;
+                *) echo "::error::$bin is missing $arch (has: $archs)"; exit 1 ;;
+              esac
+            done
+          done
