@@ -16,15 +16,17 @@ struct SidebarView: View {
 
             Divider()
 
-            if appState.sidebarMode == .folder, appState.isFolderMissing {
+            // One root: its notices sit under the header, as before. With
+            // several, each root row carries its own (see RootSection).
+            if let root = singleRoot, root.isMissing {
                 notice(icon: "exclamationmark.triangle", text: "Folder was moved or deleted")
             }
-            if appState.sidebarMode == .folder, appState.folderTree?.isTruncated == true {
+            if let root = singleRoot, root.isTruncated {
                 notice(icon: "exclamationmark.triangle",
                        text: "Showing first \(Self.formattedFileCap) files")
             }
 
-            if appState.sidebarMode == .folder, appState.isScanningFolder {
+            if let root = singleRoot, root.isScanning {
                 Spacer()
                 VStack(spacing: 8) {
                     ProgressView()
@@ -35,7 +37,7 @@ struct SidebarView: View {
                 }
                 .accessibilityElement(children: .combine)
                 Spacer()
-            } else if appState.files.isEmpty {
+            } else if appState.files.isEmpty, !isMultiRoot {
                 Spacer()
                 VStack(spacing: 8) {
                     Image(systemName: "doc.text")
@@ -53,7 +55,7 @@ struct SidebarView: View {
         }
         .frame(minWidth: 180)
         .onChange(of: appState.selectedFile?.id) { _ in
-            highlightedFolder = nil
+            if highlightedFolder != nil { highlightedFolder = nil }
         }
         .alert("Unsaved Changes", isPresented: $showUnsavedAlert) {
             Button("Save", role: .none) {
@@ -72,43 +74,59 @@ struct SidebarView: View {
         }
     }
 
+    /// The workspace's only root (single-root layout), if exactly one.
+    private var singleRoot: RootState? {
+        guard appState.sidebarMode == .folder, appState.roots.count == 1 else { return nil }
+        return appState.roots.first
+    }
+
+    private var isMultiRoot: Bool {
+        appState.sidebarMode == .folder && appState.isMultiRoot
+    }
+
     // MARK: - Header
 
     private var header: some View {
         HStack(spacing: 6) {
-            if appState.sidebarMode == .folder, let folder = appState.folderURL {
-                Image(systemName: appState.isFolderMissing ? "folder.badge.questionmark" : "folder.fill")
+            if let root = singleRoot {
+                Image(systemName: root.isMissing ? "folder.badge.questionmark" : "folder.fill")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
-                Text(folder.lastPathComponent)
+                Text(root.name)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .help(folder.path)
+                    .help(root.url.path)
                     .contextMenu {
-                        PathMenuItems(url: folder, root: nil)
+                        PathMenuItems(url: root.url, root: nil)
                     }
             } else {
-                Text("FILES")
+                Text(isMultiRoot ? "WORKSPACE" : "FILES")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
                     .tracking(0.8)
             }
             Spacer()
-            Button {
-                appState.openPanel()
+            Menu {
+                Button("Open…") {
+                    appState.openPanel()
+                }
+                Button("Add Folder to Workspace…") {
+                    appState.addFolderPanel()
+                }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 22, height: 22)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
             }
-            .buttonStyle(.plain)
-            .help("Open file or folder…")
-            .accessibilityLabel("Open File or Folder")
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 22, height: 22)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 5))
+            .help("Open, or add a folder to the workspace")
+            .accessibilityLabel("Open or Add Folder")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -134,7 +152,7 @@ struct SidebarView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private static let formattedFileCap: String = {
+    fileprivate static let formattedFileCap: String = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
         let cap = AppState.folderScanOptions.maxFiles
@@ -150,7 +168,16 @@ struct SidebarView: View {
             // onTapGesture: it swallowed clicks and, combined with the
             // selection setter, could fire attemptSelect twice per click.
             List(selection: selection) {
-                if appState.sidebarMode == .folder, let tree = appState.folderTree {
+                if isMultiRoot {
+                    ForEach(appState.roots) { root in
+                        RootSection(
+                            root: root,
+                            selectedURL: appState.selectedFile?.id,
+                            highlightedFolder: highlightedFolder,
+                            expandedFolders: $appState.expandedFolders,
+                            onRemove: { appState.removeRoot(root.url) })
+                    }
+                } else if let tree = singleRoot?.tree {
                     ForEach(tree.root.children ?? []) { node in
                         TreeNodeRow(
                             node: node,
@@ -193,24 +220,23 @@ struct SidebarView: View {
     }
 
     /// Clicks and arrow keys both arrive here. Files go through the dirty
-    /// guard; a folder row is highlighted, and a mouse click on it also
-    /// toggles it open or closed (as in VS Code's explorer).
+    /// guard; a folder (or workspace root) row is highlighted, and a mouse
+    /// click on it also toggles it open or closed (as in VS Code's explorer).
     private var selection: Binding<URL?> {
         Binding(
             get: { highlightedFolder ?? appState.selectedFile?.id },
             set: { newID in
                 guard let id = newID else { return }
-                if appState.sidebarMode == .folder, let tree = appState.folderTree,
-                   let node = tree.node(at: id), node.isFolder {
+                if appState.isFolderRow(id) {
                     if Self.isMouseEvent {
-                        appState.toggleExpanded(node.url)
+                        appState.toggleExpanded(id)
                         highlightedFolder = nil
                     } else {
-                        highlightedFolder = node.url
+                        highlightedFolder = id
                     }
                     return
                 }
-                highlightedFolder = nil
+                if highlightedFolder != nil { highlightedFolder = nil }
                 guard let file = appState.files.first(where: { $0.id == id }),
                       file != appState.selectedFile else { return }
                 attemptSelect(file)
@@ -232,6 +258,123 @@ struct SidebarView: View {
         } else {
             appState.selectFile(file)
         }
+    }
+}
+
+// MARK: - Workspace root
+
+/// One root of a multi-root workspace: a bold top-level disclosure row (its
+/// URL is both the expansion key and the selection tag) holding the root's
+/// notices and tree.
+private struct RootSection: View {
+    let root: RootState
+    let selectedURL: URL?
+    let highlightedFolder: URL?
+    @Binding var expandedFolders: Set<URL>
+    let onRemove: () -> Void
+
+    var body: some View {
+        DisclosureGroup(isExpanded: isExpanded) {
+            if isExpanded.wrappedValue {
+                if root.isMissing {
+                    RootNoticeRow(icon: "exclamationmark.triangle", text: "Folder was moved or deleted")
+                }
+                if root.isTruncated {
+                    RootNoticeRow(icon: "exclamationmark.triangle",
+                                  text: "Showing first \(SidebarView.formattedFileCap) files")
+                }
+                if root.isScanning {
+                    RootNoticeRow(icon: nil, text: "Scanning folder…", showsProgress: true)
+                } else if let tree = root.tree, !(tree.root.children ?? []).isEmpty {
+                    ForEach(tree.root.children ?? []) { node in
+                        TreeNodeRow(node: node, root: root.url, selectedURL: selectedURL,
+                                    highlightedFolder: highlightedFolder,
+                                    expandedFolders: $expandedFolders)
+                    }
+                } else if !root.isMissing {
+                    RootNoticeRow(icon: nil, text: "No Markdown files")
+                }
+            }
+        } label: {
+            RootRowView(name: root.name, path: root.url.path, isMissing: root.isMissing,
+                        isExpanded: isExpanded.wrappedValue,
+                        isHighlighted: highlightedFolder == root.url)
+                .contextMenu {
+                    PathMenuItems(url: root.url, root: nil)
+                    Divider()
+                    Button("Remove Folder from Workspace") {
+                        onRemove()
+                    }
+                }
+        }
+        .tag(root.url)
+    }
+
+    private var isExpanded: Binding<Bool> {
+        let url = root.url
+        return Binding(
+            get: { expandedFolders.contains(url) },
+            set: { expand in
+                // Write only on a real change: the outline view sets this while
+                // laying out rows, and a no-op write would republish mid-update.
+                guard expand != expandedFolders.contains(url) else { return }
+                if expand { expandedFolders.insert(url) } else { expandedFolders.remove(url) }
+            })
+    }
+}
+
+private struct RootRowView: View {
+    let name: String
+    let path: String
+    let isMissing: Bool
+    let isExpanded: Bool
+    let isHighlighted: Bool
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: isMissing ? "folder.badge.questionmark" : "folder.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(name)
+                .font(.system(size: 13, weight: .bold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.vertical, 1)
+        .help(path)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Workspace folder, \(name)")
+        .accessibilityValue(isMissing
+            ? "moved or deleted, \(isExpanded ? "expanded" : "collapsed")"
+            : (isExpanded ? "expanded" : "collapsed"))
+        .accessibilityAddTraits(isHighlighted ? [.isSelected] : [])
+    }
+}
+
+/// A non-selectable status line inside a root (no tag, so List skips it).
+private struct RootNoticeRow: View {
+    let icon: String?
+    let text: String
+    var showsProgress = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                    .accessibilityHidden(true)
+            } else if showsProgress {
+                ProgressView()
+                    .controlSize(.mini)
+            }
+            Text(text)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .foregroundStyle(.secondary)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -281,6 +424,9 @@ private struct TreeNodeRow: View {
         return Binding(
             get: { expandedFolders.contains(url) },
             set: { expand in
+                // Write only on a real change: the outline view sets this while
+                // laying out rows, and a no-op write would republish mid-update.
+                guard expand != expandedFolders.contains(url) else { return }
                 if expand { expandedFolders.insert(url) } else { expandedFolders.remove(url) }
             })
     }

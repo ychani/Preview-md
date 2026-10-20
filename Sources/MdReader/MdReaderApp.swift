@@ -12,10 +12,10 @@ struct MdReaderApp: App {
         return name.isEmpty ? url.path : name
     }
 
-    /// The opened folder, when the sidebar shows one (relative paths are
-    /// only meaningful inside a folder).
+    /// The workspace root holding the selected file (relative paths are only
+    /// meaningful inside a root).
     private var relativePathRoot: URL? {
-        appState.sidebarMode == .folder ? appState.folderURL : nil
+        appState.selectedFile.flatMap { appState.workspaceRoot(containing: $0.url) }
     }
 
     /// Standard About panel with the bundled third-party notices as Credits.
@@ -67,6 +67,11 @@ struct MdReaderApp: App {
                     appState.openPanel()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Button("Add Folder to Workspace…") {
+                    appState.addFolderPanel()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .option])
 
                 Menu("Open Recent") {
                     ForEach(appState.recentURLs, id: \.self) { url in
@@ -239,6 +244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func deliver(_ urls: [URL], to state: AppState) {
         if urls.count == 1, let url = urls.first {
             state.open(url: url)
+        } else if urls.count > 1, urls.allSatisfy(AppState.isDirectory) {
+            // Several folders: open them together as the workspace.
+            state.openFolders(urls)
         } else if urls.count > 1 {
             state.openDroppedFiles(urls)
         }
