@@ -165,4 +165,64 @@ final class FolderTreeTests: XCTestCase {
         XCTAssertTrue(tree.refresh(directory: dir, options: options))
         XCTAssertFalse(tree.contains(dir.appendingPathComponent("a")))
     }
+
+    func testAssetsInitAreCanonicalSortedAndOutsideTheTree() {
+        let tree = FolderTree(root: FileNode(url: root, kind: .folder, children: [file("top.md")]),
+                              assetFiles: [root.appendingPathComponent("z.png"),
+                                           root.appendingPathComponent("img/./a.png")])
+        XCTAssertEqual(tree.assetFiles, [url("img/a.png"), url("z.png")])
+        XCTAssertEqual(tree.flatFiles, [url("top.md")])
+        XCTAssertFalse(tree.contains(url("z.png")))
+        XCTAssertFalse(tree.isAssetListTruncated)
+    }
+
+    func testRefreshUpdatesAssetsOfThatDirectoryOnly() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FolderTreeTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func touch(_ rel: String) throws {
+            let u = dir.appendingPathComponent(rel)
+            try FileManager.default.createDirectory(at: u.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: u)
+        }
+        func names(_ tree: FolderTree) -> [String] {
+            tree.assetFiles.map { FilePathDisplay.relativePath(of: $0, in: dir) }
+        }
+        try touch("notes/n.md")
+        try touch("notes/old.png")
+        try touch("img/keep.png")
+        var options = FolderScanOptions()
+        options.maxAssetFiles = 4
+        var tree = FolderTree(scanning: dir, options: options)
+        XCTAssertEqual(names(tree), ["img/keep.png", "notes/old.png"])
+
+        // An image appearing changes only the asset list, not the sidebar tree.
+        try touch("notes/new.png")
+        try touch("notes/sub/deeper.jpg")
+        let rootBefore = tree.root
+        XCTAssertTrue(tree.refresh(directory: dir.appendingPathComponent("notes"), options: options))
+        XCTAssertEqual(tree.root, rootBefore)
+        XCTAssertEqual(names(tree), ["img/keep.png", "notes/new.png", "notes/old.png", "notes/sub/deeper.jpg"])
+        XCTAssertFalse(tree.isAssetListTruncated)
+        XCTAssertFalse(tree.refresh(directory: dir.appendingPathComponent("notes"), options: options),
+                       "nothing changed")
+
+        // The cap counts assets outside the refreshed directory.
+        try touch("notes/zz.png")
+        XCTAssertTrue(tree.refresh(directory: dir.appendingPathComponent("notes"), options: options))
+        XCTAssertEqual(tree.assetFiles.count, 4)
+        XCTAssertTrue(tree.isAssetListTruncated)
+        XCTAssertTrue(names(tree).contains("img/keep.png"))
+
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("notes/old.png"))
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("notes/zz.png"))
+        tree.refresh(directory: dir.appendingPathComponent("notes"), options: options)
+        XCTAssertEqual(names(tree), ["img/keep.png", "notes/new.png", "notes/sub/deeper.jpg"])
+
+        // Refreshing an image-only folder (not in the tree) still updates its assets.
+        try FileManager.default.removeItem(at: dir.appendingPathComponent("img"))
+        XCTAssertTrue(tree.refresh(directory: dir.appendingPathComponent("img"), options: options))
+        XCTAssertEqual(names(tree), ["notes/new.png", "notes/sub/deeper.jpg"])
+    }
 }
