@@ -11,6 +11,20 @@ public enum MarkdownRenderBridge {
         return "render((\(arr))[0])"
     }
 
+    /// Like `renderJS(for:)`, but first tells the page where relative images
+    /// resolve (`previewmd-local://<token>/`), or that they don't (nil).
+    public static func renderJS(for markdown: String, imageBase: String?) -> String? {
+        guard let render = renderJS(for: markdown) else { return nil }
+        let base: String
+        if let imageBase {
+            guard let arr = jsonArrayLiteral(imageBase) else { return nil }
+            base = "(\(arr))[0]"
+        } else {
+            base = "null"
+        }
+        return "setImageBase(\(base));\(render)"
+    }
+
     static func jsonArrayLiteral(_ value: String) -> String? {
         guard let data = try? JSONSerialization.data(
                 withJSONObject: [value], options: []) else { return nil }

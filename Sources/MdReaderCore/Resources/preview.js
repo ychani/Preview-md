@@ -44,9 +44,51 @@ var IMAGE_URL_ATTRS = ['src', 'srcset', 'poster', 'background', 'style'];
 var REMOTE_URL = /(^|[\s,('"])https?:\/\//i;
 var remoteRefCount = 0;
 
+// ── Local images ──────────────────────────────────────────────
+// Relative <img src> is rewritten to the app's previewmd-local: scheme,
+// which serves image files from the document's folder only (validated again
+// in Swift). Set by the app before each render; null in Quick Look or when
+// there is no document file, in which case relative images stay blocked.
+var imageBase = null;
+function setImageBase(base) {
+  imageBase = (typeof base === 'string' && /^previewmd-local:\/\/[a-z0-9-]+\/$/.test(base)) ? base : null;
+}
+window.setImageBase = setImageBase;
+
+function isRelativeURL(s) {
+  return !/^[a-z][a-z0-9+.\-]*:/i.test(s) && !/^[\/\\#]/.test(s);
+}
+
+// Resolve against a sentinel root; if the result leaves it, the path used
+// ../ to climb out of the document folder and is refused.
+var LOCAL_PROBE_ROOT = '/__previewmd_root__/';
+function localImageURL(src) {
+  if (!imageBase) return null;
+  var u;
+  try { u = new URL(src, 'previewmd-local://probe' + LOCAL_PROBE_ROOT); } catch (e) { return null; }
+  if (u.protocol !== 'previewmd-local:' || u.host !== 'probe') return null;
+  if (u.pathname.indexOf(LOCAL_PROBE_ROOT) !== 0) return null;
+  var rel = u.pathname.slice(LOCAL_PROBE_ROOT.length);
+  return rel ? imageBase + rel : null;
+}
+
+function rewriteLocalImage(node) {
+  if (node.nodeName !== 'IMG') return;
+  var src = (node.getAttribute('src') || '').trim();
+  if (!src || !isRelativeURL(src)) return;
+  var local = localImageURL(src);
+  if (local) {
+    node.setAttribute('src', local);
+  } else {
+    node.removeAttribute('src');
+    node.classList.add('previewmd-blocked-image');
+  }
+}
+
 if (purifyAPI && typeof purifyAPI.addHook === 'function') {
   purifyAPI.addHook('afterSanitizeAttributes', function (node) {
     if (!node.getAttribute) return;
+    rewriteLocalImage(node);
     for (var i = 0; i < IMAGE_URL_ATTRS.length; i++) {
       var v = node.getAttribute(IMAGE_URL_ATTRS[i]);
       if (v && REMOTE_URL.test(v)) { remoteRefCount++; break; }

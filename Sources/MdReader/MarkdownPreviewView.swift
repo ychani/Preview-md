@@ -38,6 +38,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
         // No cookies, cache or storage written to disk, and nothing shared
         // with other web views.
         config.websiteDataStore = .nonPersistent()
+        // Relative images next to the document; must be registered before
+        // the web view is created.
+        config.setURLSchemeHandler(
+            coordinator.imageHandler, forURLScheme: LocalImageSchemeHandler.scheme)
         for name in Self.messageNames {
             config.userContentController.add(coordinator, name: name)
         }
@@ -86,12 +90,21 @@ struct MarkdownPreviewView: NSViewRepresentable {
         var onRenderComplete: (() -> Void)?
         var onTOCUpdate: (([TOCEntry]) -> Void)?
         var onWebViewReady: ((WKWebView?) -> Void)?
-        private var lastRendered: String?
+        let imageHandler = LocalImageSchemeHandler()
+        /// What was last sent to `render()`: the text and the image base it
+        /// was rendered with (a different folder must re-render).
+        private struct RenderKey: Equatable {
+            let markdown: String
+            let imageBase: String?
+        }
+        private var lastRendered: RenderKey?
         private var isLoaded = false
         private var debounceItem: DispatchWorkItem?
         private var lastScrollRequestID: UUID?
 
         private var documentURL: URL?
+        /// `previewmd-local://<token>/` for the document's folder, or nil.
+        private var imageBase: String?
 
         /// What a remote-images opt-in applies to: the document, or — when the
         /// host passes no `documentURL` — the exact text, so the opt-in can
@@ -110,7 +123,12 @@ struct MarkdownPreviewView: NSViewRepresentable {
         // MARK: Document / shell
 
         func setDocument(_ url: URL?) {
-            documentURL = url?.standardizedFileURL
+            let normalized = url?.standardizedFileURL
+            guard normalized != documentURL else { return }
+            documentURL = normalized
+            imageBase = normalized.map {
+                imageHandler.register(folder: $0.deletingLastPathComponent())
+            }
         }
 
         private func currentScope(for markdown: String) -> OptInScope {
@@ -150,7 +168,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         // MARK: Rendering
 
         func scheduleRender(_ markdown: String) {
-            if markdown == lastRendered { return }
+            if RenderKey(markdown: markdown, imageBase: imageBase) == lastRendered { return }
             pendingMarkdown = markdown
             debounceItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
@@ -162,12 +180,13 @@ struct MarkdownPreviewView: NSViewRepresentable {
 
         private func flushRender() {
             guard isLoaded, let webView else { return }
-            let markdown = pendingMarkdown
-            guard let js = MarkdownRenderBridge.renderJS(for: markdown) else { return }
+            let key = RenderKey(markdown: pendingMarkdown, imageBase: imageBase)
+            guard let js = MarkdownRenderBridge.renderJS(
+                    for: key.markdown, imageBase: key.imageBase) else { return }
             webView.evaluateJavaScript(js) { [weak self] _, _ in
                 self?.onRenderComplete?()
             }
-            lastRendered = markdown
+            lastRendered = key
         }
 
         func handleScrollRequest(_ request: ScrollRequest?) {

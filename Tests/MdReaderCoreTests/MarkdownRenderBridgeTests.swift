@@ -41,6 +41,17 @@ final class MarkdownRenderBridgeTests: XCTestCase {
     func testEmptyString() throws {
         XCTAssertEqual(try roundTrip(""), "")
     }
+
+    func testRenderWithImageBase() throws {
+        let js = try XCTUnwrap(MarkdownRenderBridge.renderJS(
+            for: "# Hi", imageBase: "previewmd-local://doc-1/"))
+        XCTAssertEqual(js, ##"setImageBase((["previewmd-local:\/\/doc-1\/"])[0]);render((["# Hi"])[0])"##)
+        let none = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: "x", imageBase: nil))
+        XCTAssertEqual(none, #"setImageBase(null);render((["x"])[0])"#)
+        // A hostile base can't break out of the string literal.
+        let evil = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: "x", imageBase: "\");alert(1);//"))
+        XCTAssertTrue(evil.hasPrefix(#"setImageBase((["\");alert(1);\/\/"])[0]);"#), evil)
+    }
 }
 
 final class PreviewContentSecurityPolicyTests: XCTestCase {
