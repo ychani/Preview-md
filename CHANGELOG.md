@@ -20,6 +20,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - Added copyright and app-category metadata; `CFBundleVersion` is now a
   monotonically increasing build number (commit count).
 
+### Fixed
+- Opening a Markdown file from Finder (or `open -a PreviewMD file.md`) while
+  PreviewMD is running now loads it into the existing window instead of
+  opening an extra, duplicate window.
+
 ### Build
 - `make app` builds universally (`ARCHS=arm64` for a Command-Line-Tools-only
   build) and signs inside-out — Quick Look extension (with its entitlements),

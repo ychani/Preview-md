@@ -38,6 +38,11 @@ struct MdReaderApp: App {
                 .onOpenURL { url in
                     appState.open(url: url)
                 }
+                // All windows share one AppState, so route Finder / `open -a`
+                // opens to the existing window instead of letting WindowGroup
+                // spawn a new one per event. A window is still created when
+                // none is open.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
