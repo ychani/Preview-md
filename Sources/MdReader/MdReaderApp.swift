@@ -12,10 +12,10 @@ struct MdReaderApp: App {
         return name.isEmpty ? url.path : name
     }
 
-    /// The opened folder, when the sidebar shows one (relative paths are
-    /// only meaningful inside a folder).
+    /// The workspace root holding the selected file (relative paths are only
+    /// meaningful inside a root).
     private var relativePathRoot: URL? {
-        appState.sidebarMode == .folder ? appState.folderURL : nil
+        appState.selectedFile.flatMap { appState.workspaceRoot(containing: $0.url) }
     }
 
     /// Standard About panel with the bundled third-party notices as Credits.

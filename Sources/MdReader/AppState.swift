@@ -5,21 +5,42 @@ import MdReaderCore
 import UniformTypeIdentifiers
 import WebKit
 
-private let kBookmarkKey = "FolderSecurityBookmark"
+/// Pre-workspace key: one bookmark for the last opened folder. Migrated to
+/// `kWorkspaceBookmarksKey` on first launch.
+private let kLegacyBookmarkKey = "FolderSecurityBookmark"
+/// The workspace's root folders, as an array of bookmarks in root order.
+private let kWorkspaceBookmarksKey = "WorkspaceRootBookmarks"
 private let kRecentsKey = "RecentFileURLs"
 private let kMaxRecents = 10
 
-/// The sidebar can display one of two populations: the contents of a folder the
-/// user opened, or an ad-hoc list of explicitly-opened files (picker, drag,
-/// Finder double-click).
+/// The sidebar can display one of two populations: the folders of the
+/// workspace (one or more roots the user opened), or an ad-hoc list of
+/// explicitly-opened files (picker, drag, Finder double-click).
 enum SidebarMode {
     case openedFiles
     case folder
 }
 
+/// One root folder of the workspace, as the sidebar shows it.
+struct RootState: Identifiable, Equatable {
+    /// Canonical (`FileNode.canonicalURL`), equal to its tree's `rootURL`.
+    let url: URL
+    /// Nil until the first scan lands.
+    var tree: FolderTree?
+    /// True while the first scan runs.
+    var isScanning = true
+    /// True once the folder was deleted, renamed or moved away. Its last
+    /// tree stays on screen; updates stop.
+    var isMissing = false
+
+    /// The tree hit the file cap.
+    var isTruncated: Bool { tree?.isTruncated ?? false }
+    var id: URL { url }
+    var name: String { url.lastPathComponent }
+}
+
 @MainActor
 final class AppState: ObservableObject {
-    @Published var folderURL: URL?
     @Published var files: [MarkdownFile] = []
     @Published var selectedFile: MarkdownFile?
     @Published var viewMode: ViewMode = .preview
@@ -83,22 +104,16 @@ final class AppState: ObservableObject {
     /// Up to `kMaxRecents` most-recently-opened files (or folders), newest first.
     @Published var recentURLs: [URL] = []
 
-    // MARK: – Folder explorer
+    // MARK: – Workspace (folder explorer)
 
-    /// The opened folder's tree (folder mode only). `files` is its
-    /// `flatFiles`, in the same display order. Nil while the first scan runs.
-    @Published private(set) var folderTree: FolderTree?
+    /// The workspace's root folders, in order (folder mode only). `files` is
+    /// their trees' `flatFiles`, concatenated in root order.
+    @Published private(set) var roots: [RootState] = []
 
-    /// Folders shown expanded in the sidebar tree, by tree URL. Survives live
-    /// updates (a folder that disappears and comes back stays expanded).
+    /// Folders shown expanded in the sidebar tree, by tree URL (a root's own
+    /// URL for its top-level row). Survives live updates (a folder that
+    /// disappears and comes back stays expanded).
     @Published var expandedFolders: Set<URL> = []
-
-    /// True while the opened folder's first scan is running.
-    @Published private(set) var isScanningFolder: Bool = false
-
-    /// True once the opened folder was deleted, renamed or moved away. The
-    /// last tree (and the open document) stay on screen; updates stop.
-    @Published private(set) var isFolderMissing: Bool = false
 
     /// Asks the sidebar to scroll a row into view (after auto-reveal).
     @Published private(set) var revealRequest: RevealRequest?
@@ -110,10 +125,25 @@ final class AppState: ObservableObject {
 
     static let folderScanOptions = FolderScanOptions.default
 
-    private var folderSession: FolderScanSession?
-    /// Started per opened folder; stopped on folder change, when switching to
-    /// opened-files mode, when the root disappears, and on deinit.
-    nonisolated(unsafe) private var folderWatcher: FolderWatcher?
+    /// Mirrors `roots` (URLs only) and holds the add/lookup rules.
+    private var workspace = WorkspaceRoots()
+    /// One background scan session per root, keyed by root URL.
+    private var rootSessions: [URL: FolderScanSession] = [:]
+    /// One watcher per root. Stopped when the root is removed or goes
+    /// missing, when the workspace is replaced or closed, and on deinit.
+    nonisolated(unsafe) private var rootWatchers: [URL: FolderWatcher] = [:]
+    /// A fresh workspace (or an add with nothing selected) selects a first
+    /// file once the roots before it have finished scanning.
+    private var pendingInitialSelection = false
+
+    /// More than one root: the sidebar shows each as a top-level row.
+    var isMultiRoot: Bool { roots.count > 1 }
+
+    /// The workspace root that is or contains `url`, if any — for relative
+    /// paths and the window subtitle.
+    func workspaceRoot(containing url: URL) -> URL? {
+        workspace.root(containing: url)
+    }
 
     // MARK: – Find state
 
@@ -153,18 +183,19 @@ final class AppState: ObservableObject {
 
     init() {
         loadRecents()
-        scheduleLastFolderRestore()
+        Self.migrateLegacyBookmark()
+        scheduleWorkspaceRestore()
     }
 
     deinit {
-        folderWatcher?.stop()
+        for watcher in rootWatchers.values { watcher.stop() }
     }
 
     // MARK: – Open (file or folder)
 
     /// Shows an NSOpenPanel that accepts Markdown files and folders. Several
-    /// files open together in the opened-files list; a folder opens as the
-    /// sidebar tree. A mixed selection opens just the files.
+    /// files open together in the opened-files list; one or more folders
+    /// open as the workspace. A mixed selection opens just the files.
     func openPanel() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -181,8 +212,8 @@ final class AppState: ObservableObject {
 
     /// Routes an open-panel selection: one file replaces the document (as
     /// before), several files join the opened-files list with the first one
-    /// selected, a lone folder opens as the tree. Folders in a mixed
-    /// selection are ignored.
+    /// selected, folders open as the workspace (one root each). Folders in a
+    /// mixed selection are ignored.
     private func openPanelSelection(_ urls: [URL]) {
         var files: [URL] = []
         var folders: [URL] = []
@@ -199,11 +230,32 @@ final class AppState: ObservableObject {
         case (1, _):
             open(url: files[0])
         case (0, _):
-            // Several folders: there is one tree, so open the first.
-            open(url: folders[0])
+            openFolders(folders)
         default:
             openDroppedFiles(files, selectingFirst: true)
         }
+    }
+
+    /// Opens `urls` (folders) as a new workspace, replacing the current one.
+    /// Folders nested inside another of them are dropped. One folder goes
+    /// through `open(url:)`; every opened folder is recorded in recents.
+    func openFolders(_ urls: [URL]) {
+        let folders = WorkspaceRoots.outermost(urls.filter(Self.isDirectory))
+        if folders.count == 1 {
+            open(url: folders[0])
+            return
+        }
+        guard !folders.isEmpty else { return }
+        hasOpenedDocument = true
+        guard openWorkspace(folders) else { return }
+        for folder in folders { addRecent(folder) }
+    }
+
+    static func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return url.isFileURL
+            && FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
     }
 
     /// The single rule for what PreviewMD opens: an existing Markdown file
@@ -223,8 +275,9 @@ final class AppState: ObservableObject {
 
     /// Routes an arbitrary URL (from the open panel, `onOpenURL`, or Finder
     /// double-click of a single file) to the right loader. A single-file open
-    /// hides the sidebar; a folder open shows it. Nothing is recorded (recents,
-    /// bookmark) if the user cancels the unsaved-changes prompt.
+    /// hides the sidebar; a folder open replaces the workspace with that one
+    /// folder and shows it. Nothing is recorded (recents, workspace bookmarks)
+    /// if the user cancels the unsaved-changes prompt.
     func open(url: URL) {
         hasOpenedDocument = true
         var isDir: ObjCBool = false
@@ -237,8 +290,7 @@ final class AppState: ObservableObject {
             return
         }
         if isDir.boolValue {
-            guard loadFolder(url) else { return }
-            saveBookmark(for: url)
+            guard openWorkspace([url]) else { return }
         } else {
             guard openFile(at: url) else { return }
         }
@@ -251,9 +303,8 @@ final class AppState: ObservableObject {
     @discardableResult
     func openFile(at url: URL) -> Bool {
         guard confirmDiscardIfNeeded() else { return false }
-        closeFolder()
+        closeWorkspace()
         sidebarMode = .openedFiles
-        folderURL = nil
         showSidebar = false
         let file = MarkdownFile(url: url)
         files = [file]
@@ -277,11 +328,10 @@ final class AppState: ObservableObject {
         }
         hasOpenedDocument = true
 
-        // Drops discard any previously-loaded folder context.
+        // Drops discard any previously-loaded workspace.
         if sidebarMode == .folder {
-            closeFolder()
+            closeWorkspace()
             files = []
-            folderURL = nil
             sidebarMode = .openedFiles
         }
 
@@ -343,52 +393,161 @@ final class AppState: ObservableObject {
         showSidebar.toggle()
     }
 
-    /// Opens `url` as the sidebar tree. The recursive scan runs off the main
-    /// thread (an iCloud vault can hold thousands of files); the sidebar shows
-    /// a loading state until it lands, then the preferred file — or the first
-    /// one — is selected. Returns false if the user cancelled the
+    /// Opens `url` as a one-folder workspace (see `openWorkspace`). Kept for
+    /// existing callers. Returns false if the user cancelled the
     /// unsaved-changes prompt.
     @discardableResult
     func loadFolder(_ url: URL, preferredSelection: URL? = nil) -> Bool {
+        openWorkspace([url], preferredSelection: preferredSelection)
+    }
+
+    /// Replaces the workspace with `urls` (in order; duplicates and folders
+    /// nested inside an earlier one are dropped). Each root is scanned off
+    /// the main thread (an iCloud vault can hold thousands of files) and
+    /// watched for changes; the sidebar shows a loading state per root until
+    /// its scan lands. Then the preferred file — or the first file of the
+    /// first root that has one — is selected. Returns false if the user
+    /// cancelled the unsaved-changes prompt (or `urls` held no folder).
+    @discardableResult
+    func openWorkspace(_ urls: [URL], preferredSelection: URL? = nil) -> Bool {
+        let newWorkspace = WorkspaceRoots(urls)
+        guard !newWorkspace.isEmpty else { return false }
         guard confirmDiscardIfNeeded() else { return false }
-        let root = FileNode.canonicalURL(url)
-        let sameRoot = folderTree?.rootURL == root
-        closeFolder()
-        if !sameRoot { expandedFolders = [] }
-        folderURL = url
+        hasOpenedDocument = true
+        let sameRoots = newWorkspace == workspace
+        closeWorkspace()
+        if !sameRoots { expandedFolders = [] }
+        workspace = newWorkspace
+        roots = newWorkspace.roots.map { RootState(url: $0) }
+        // Root rows (multi-root layout) start expanded.
+        expandedFolders.formUnion(newWorkspace.roots)
         sidebarMode = .folder
         showSidebar = true
         files = []
-        isScanningFolder = true
 
         // A preferred file is known up front: show it while the scan runs.
         if let preferred = preferredSelection,
+           let root = newWorkspace.root(containing: preferred),
            let treeURL = Self.treeURL(for: preferred, under: root),
            Self.canOpen(preferred, allowingDirectories: false) {
             selectFile(MarkdownFile(url: treeURL))
         } else {
             clearSelection()
+            pendingInitialSelection = true
         }
 
-        let session = FolderScanSession(root: root, options: Self.folderScanOptions) {
-            [weak self] session, update in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.applyFolderUpdate(update, from: session) }
-            }
-        }
-        folderSession = session
-        // Watch before scanning: changes made during the scan are picked up
-        // by a refresh queued behind it.
-        let watcher = FolderWatcher(root: root, queue: .main, latency: 0.3) {
-            [weak self, weak session] event in
-            MainActor.assumeIsolated {
-                guard let self, let session else { return }
-                self.handleFolderEvent(event, from: session)
-            }
-        }
-        if watcher.start() { folderWatcher = watcher }
-        session.startInitialScan()
+        for root in newWorkspace.roots { startRoot(root) }
+        persistWorkspace()
         return true
+    }
+
+    /// Appends `urls` (folders) to the workspace as new roots, expanded. A
+    /// folder equal to, inside, or containing an existing root is not added;
+    /// one alert names the clashing root(s). With no workspace open this
+    /// opens one instead.
+    func addFolders(_ urls: [URL]) {
+        let folders = WorkspaceRoots.outermost(urls.filter(Self.isDirectory))
+        guard !folders.isEmpty else { return }
+        guard sidebarMode == .folder, !roots.isEmpty else {
+            openFolders(folders)
+            return
+        }
+        hasOpenedDocument = true
+        var notices: [String] = []
+        var added: [URL] = []
+        for folder in folders {
+            let name = "“\(folder.lastPathComponent)”"
+            switch workspace.add(folder) {
+            case .added:
+                if let root = workspace.roots.last { added.append(root) }
+            case .alreadyPresent:
+                notices.append("\(name) is already in the workspace.")
+            case .insideExisting(let root):
+                notices.append("\(name) is inside “\(root.lastPathComponent)”, "
+                    + "which is already in the workspace.")
+            case .containsExisting(let existing):
+                let names = ListFormatter.localizedString(
+                    byJoining: existing.map { "“\($0.lastPathComponent)”" })
+                let them = existing.count == 1 ? "it" : "them"
+                notices.append("\(name) contains \(names), already in the workspace. "
+                    + "Remove \(them) from the workspace first to add \(name).")
+            }
+        }
+        if !added.isEmpty {
+            // The current root keeps its (implicitly expanded) look when the
+            // sidebar switches to the multi-root layout.
+            expandedFolders.formUnion(roots.map(\.url))
+            for root in added {
+                roots.append(RootState(url: root))
+                expandedFolders.insert(root)
+                startRoot(root)
+                addRecent(root)
+            }
+            showSidebar = true
+            if selectedFile == nil { pendingInitialSelection = true }
+            persistWorkspace()
+        }
+        if !notices.isEmpty {
+            let alert = NSAlert()
+            alert.messageText = notices.count == 1 && added.isEmpty
+                ? "Folder not added" : "Some folders were not added"
+            alert.informativeText = notices.joined(separator: "\n\n")
+            alert.alertStyle = .informational
+            alert.runModal()
+        }
+    }
+
+    /// Shows an NSOpenPanel for folders only and adds the chosen ones to the
+    /// workspace.
+    func addFolderPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.message = "Choose folders to add to the workspace."
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        addFolders(panel.urls)
+    }
+
+    /// Removes root `url` from the workspace (nothing on disk changes). If
+    /// the selected file is inside it, the unsaved-changes prompt runs first
+    /// and the selection is cleared.
+    func removeRoot(_ url: URL) {
+        guard let index = workspace.index(of: url) else { return }
+        let root = workspace.roots[index]
+        let selectionInside = selectedFile.map {
+            FileNode.relativeComponents(of: $0.url, under: root) != nil
+        } ?? false
+        if selectionInside {
+            guard confirmDiscardIfNeeded() else { return }
+        }
+        workspace.remove(root)
+        rootWatchers.removeValue(forKey: root)?.stop()
+        rootSessions.removeValue(forKey: root)?.cancel()
+        roots.removeAll { $0.url == root }
+        expandedFolders = expandedFolders.filter {
+            FileNode.relativeComponents(of: $0, under: root) == nil
+        }
+        if selectionInside { clearSelection() }
+        if roots.isEmpty {
+            sidebarMode = .openedFiles
+            files = []
+        } else {
+            rebuildFiles()
+        }
+        persistWorkspace()
+        selectInitialFileIfReady()
+    }
+
+    /// True if `url` is a workspace root or a folder in one of the trees: a
+    /// sidebar row that expands and collapses rather than opens.
+    func isFolderRow(_ url: URL) -> Bool {
+        guard sidebarMode == .folder else { return false }
+        if workspace.index(of: url) != nil { return true }
+        guard let root = roots.first(where: { FileNode.relativeComponents(of: url, under: $0.url) != nil }),
+              let node = root.tree?.node(at: url) else { return false }
+        return node.isFolder
     }
 
     /// `url` rebuilt from `root` by name, so it equals the tree's own URL
@@ -399,46 +558,102 @@ final class AppState: ObservableObject {
         return components.reduce(root) { $0.appendingPathComponent($1, isDirectory: false) }
     }
 
-    /// Tears down folder mode's tree, watcher and background session.
-    /// Expansion state is left to the caller.
-    private func closeFolder() {
-        folderWatcher?.stop()
-        folderWatcher = nil
-        folderSession?.cancel()
-        folderSession = nil
-        folderTree = nil
-        isScanningFolder = false
-        isFolderMissing = false
+    /// Starts the scan session and watcher for one root.
+    private func startRoot(_ root: URL) {
+        let session = FolderScanSession(root: root, options: Self.folderScanOptions) {
+            [weak self] session, update in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.applyFolderUpdate(update, from: session) }
+            }
+        }
+        rootSessions[root] = session
+        // Watch before scanning: changes made during the scan are picked up
+        // by a refresh queued behind it.
+        let watcher = FolderWatcher(root: root, queue: .main, latency: 0.3) {
+            [weak self, weak session] event in
+            MainActor.assumeIsolated {
+                guard let self, let session else { return }
+                self.handleFolderEvent(event, from: session)
+            }
+        }
+        if watcher.start() { rootWatchers[root] = watcher }
+        session.startInitialScan()
+    }
+
+    /// Tears down every root's tree, watcher and background session.
+    /// Expansion state and the persisted workspace are left to the caller.
+    private func closeWorkspace() {
+        for watcher in rootWatchers.values { watcher.stop() }
+        rootWatchers = [:]
+        for session in rootSessions.values { session.cancel() }
+        rootSessions = [:]
+        roots = []
+        workspace = WorkspaceRoots()
+        pendingInitialSelection = false
+    }
+
+    /// Index in `roots` of the root `session` scans; nil once that root was
+    /// removed, went missing, or the workspace was replaced.
+    private func rootIndex(for session: FolderScanSession) -> Int? {
+        guard let url = rootSessions.first(where: { $0.value === session })?.key else { return nil }
+        return roots.firstIndex { $0.url == url }
     }
 
     private func applyFolderUpdate(_ update: FolderScanSession.Update, from session: FolderScanSession) {
-        guard session === folderSession, sidebarMode == .folder else { return }
+        guard sidebarMode == .folder, let index = rootIndex(for: session) else { return }
         switch update {
         case .loaded(let tree):
-            isScanningFolder = false
-            publishTree(tree)
+            roots[index].isScanning = false
+            publishTree(tree, at: index)
             if let selected = selectedFile {
-                revealInTree(selected.url)
-            } else if let first = Self.initialFile(in: tree) {
-                selectFile(MarkdownFile(url: first))
+                if workspace.root(containing: selected.url) == roots[index].url {
+                    revealInTree(selected.url)
+                }
             }
+            selectInitialFileIfReady()
         case .changed(let tree):
-            publishTree(tree)
+            publishTree(tree, at: index)
         case .failed(let message):
-            isScanningFolder = false
-            folderWatcher?.stop()
-            folderWatcher = nil
+            let root = roots[index].url
+            roots[index].isScanning = false
+            rootWatchers.removeValue(forKey: root)?.stop()
             presentError(
                 title: "Could not open folder",
                 message: "“\(session.root.lastPathComponent)” could not be read: \(message)")
+            selectInitialFileIfReady()
         }
     }
 
-    private func publishTree(_ tree: FolderTree) {
-        guard tree != folderTree else { return }
-        folderTree = tree
-        // Same URLs as the tree, so selection tags match sidebar rows.
-        files = tree.flatFiles.map(MarkdownFile.init(url:))
+    private func publishTree(_ tree: FolderTree, at index: Int) {
+        guard tree != roots[index].tree else { return }
+        roots[index].tree = tree
+        rebuildFiles()
+    }
+
+    /// `files` = every root's files in root order. Same URLs as the trees,
+    /// so selection tags match sidebar rows.
+    private func rebuildFiles() {
+        files = roots.flatMap { $0.tree?.flatFiles ?? [] }.map(MarkdownFile.init(url:))
+    }
+
+    /// Fills an empty selection once it is deterministic: the first file of
+    /// the first root (in order) that has one, waiting while an earlier root
+    /// is still scanning.
+    private func selectInitialFileIfReady() {
+        guard pendingInitialSelection else { return }
+        guard selectedFile == nil else {
+            pendingInitialSelection = false
+            return
+        }
+        for root in roots {
+            if root.isScanning { return }
+            if let tree = root.tree, let first = Self.initialFile(in: tree) {
+                pendingInitialSelection = false
+                selectFile(MarkdownFile(url: first))
+                return
+            }
+        }
+        pendingInitialSelection = false
     }
 
     /// The file a fresh folder opens on: the first one at the top level
@@ -448,30 +663,34 @@ final class AppState: ObservableObject {
     }
 
     private func handleFolderEvent(_ event: FolderWatcher.Event, from session: FolderScanSession) {
-        guard session === folderSession else { return }
+        guard let index = rootIndex(for: session) else { return }
         switch event {
         case .changed(let directories):
             session.refresh(directories)
         case .mustRescanAll:
             session.rescanAll()
         case .rootGone:
-            // Keep the last tree and the open document; the single-file
-            // watcher still tracks the document itself.
-            isFolderMissing = true
-            folderWatcher?.stop()
-            folderWatcher = nil
+            // Only this root: keep its last tree and the open document (the
+            // single-file watcher still tracks the document itself).
+            let root = roots[index].url
+            roots[index].isMissing = true
+            roots[index].isScanning = false
+            rootWatchers.removeValue(forKey: root)?.stop()
             session.cancel()
-            folderSession = nil
+            rootSessions.removeValue(forKey: root)
+            selectInitialFileIfReady()
         }
     }
 
-    /// Expands the folders above `url` (folder mode) and asks the sidebar to
-    /// scroll to it.
+    /// Expands the root row and folders above `url` (folder mode) and asks
+    /// the sidebar to scroll to it.
     private func revealInTree(_ url: URL) {
-        guard sidebarMode == .folder, let tree = folderTree else { return }
-        let ancestors = tree.ancestors(of: url)
-        if !ancestors.allSatisfy(expandedFolders.contains) {
-            expandedFolders.formUnion(ancestors)
+        guard sidebarMode == .folder,
+              let root = roots.first(where: { FileNode.relativeComponents(of: url, under: $0.url) != nil }),
+              let tree = root.tree else { return }
+        let toExpand = [root.url] + tree.ancestors(of: url)
+        if !toExpand.allSatisfy(expandedFolders.contains) {
+            expandedFolders.formUnion(toExpand)
         }
         revealRequest = RevealRequest(url: url)
     }
@@ -800,31 +1019,45 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: – Last-folder restore
+    // MARK: – Workspace restore
 
-    // The app is not sandboxed, so a plain bookmark (which survives renames
-    // and moves) is all that's needed — no security scope.
-    private func saveBookmark(for url: URL) {
-        guard let data = try? url.bookmarkData(
-            options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-        else { return }
-        UserDefaults.standard.set(data, forKey: kBookmarkKey)
+    // The app is not sandboxed, so plain bookmarks (which survive renames
+    // and moves) are all that's needed — no security scope.
+
+    /// Saves the current roots, in order; clears the key when there are none.
+    private func persistWorkspace() {
+        let defaults = UserDefaults.standard
+        guard !workspace.isEmpty else {
+            defaults.removeObject(forKey: kWorkspaceBookmarksKey)
+            return
+        }
+        defaults.set(WorkspaceBookmarks.encode(workspace.roots), forKey: kWorkspaceBookmarksKey)
     }
 
-    private func clearBookmark() {
-        UserDefaults.standard.removeObject(forKey: kBookmarkKey)
+    private static var storedWorkspaceBookmarks: [Data] {
+        UserDefaults.standard.array(forKey: kWorkspaceBookmarksKey) as? [Data] ?? []
     }
 
-    /// Reopens the last folder once launch has finished — but only if launch
-    /// didn't open something itself (Finder double-click, Dock drop, `open`),
-    /// which would otherwise be clobbered or flash the folder first.
-    private func scheduleLastFolderRestore() {
-        guard UserDefaults.standard.data(forKey: kBookmarkKey) != nil else { return }
+    /// One-time move of the single-folder bookmark into the workspace key.
+    private static func migrateLegacyBookmark() {
+        let defaults = UserDefaults.standard
+        guard let legacy = defaults.data(forKey: kLegacyBookmarkKey) else { return }
+        if defaults.object(forKey: kWorkspaceBookmarksKey) == nil {
+            defaults.set([legacy], forKey: kWorkspaceBookmarksKey)
+        }
+        defaults.removeObject(forKey: kLegacyBookmarkKey)
+    }
+
+    /// Reopens the last workspace once launch has finished — but only if
+    /// launch didn't open something itself (Finder double-click, Dock drop,
+    /// `open`), which would otherwise be clobbered or flash the folders first.
+    private func scheduleWorkspaceRestore() {
+        guard !Self.storedWorkspaceBookmarks.isEmpty else { return }
         let deferRestore = { [weak self] in
             // Launch-time opens are delivered asynchronously after the window
             // appears; give them a beat to land.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                MainActor.assumeIsolated { self?.restoreLastFolderIfIdle() }
+                MainActor.assumeIsolated { self?.restoreWorkspaceIfIdle() }
             }
         }
         if NSRunningApplication.current.isFinishedLaunching {
@@ -844,29 +1077,17 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func restoreLastFolderIfIdle() {
-        guard !hasOpenedDocument, selectedFile == nil, files.isEmpty, folderURL == nil else { return }
-        guard let data = UserDefaults.standard.data(forKey: kBookmarkKey) else { return }
-        var stale = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data, options: [.withoutUI],
-            relativeTo: nil, bookmarkDataIsStale: &stale)
-        else {
-            clearBookmark()
+    private func restoreWorkspaceIfIdle() {
+        guard !hasOpenedDocument, selectedFile == nil, files.isEmpty, roots.isEmpty else { return }
+        // Roots that are gone, not folders, or unreadable (e.g. permission
+        // denied) are skipped quietly instead of alerting on every launch.
+        let urls = WorkspaceBookmarks.resolve(Self.storedWorkspaceBookmarks)
+        guard !urls.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: kWorkspaceBookmarksKey)
             return
         }
-        // Gone, not a folder, or unreadable (e.g. permission denied): forget
-        // it quietly instead of alerting on every launch.
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-              isDirectory.boolValue,
-              (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) != nil
-        else {
-            clearBookmark()
-            return
-        }
-        if stale { saveBookmark(for: url) }
-        loadFolder(url)
+        // Re-persists the surviving roots (refreshing stale bookmarks).
+        openWorkspace(urls)
     }
 
     // MARK: – Recent files
@@ -1030,8 +1251,8 @@ final class AppState: ObservableObject {
 /// `publish` only when it actually changed — so our own saves, which touch
 /// the folder but not its listing, never republish.
 ///
-/// One session per `loadFolder`; the owner drops results from a session it
-/// no longer holds. `cancel()` stops further work (an in-flight scan still
+/// One session per workspace root; the owner drops results from a session
+/// it no longer holds. `cancel()` stops further work (an in-flight scan still
 /// finishes, but its result is not delivered).
 private final class FolderScanSession: @unchecked Sendable {
 

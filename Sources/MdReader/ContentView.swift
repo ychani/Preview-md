@@ -62,7 +62,7 @@ struct ContentView: View {
         guard let url = appState.selectedFile?.url else { return "" }
         return FileLocationActions.locationSubtitle(
             for: url,
-            folderRoot: appState.sidebarMode == .folder ? appState.folderURL : nil)
+            folderRoot: appState.workspaceRoot(containing: url))
     }
 
     @ToolbarContentBuilder
@@ -275,17 +275,17 @@ private struct EmptyStateView: View {
             }
             .accessibilityHidden(true)
             VStack(spacing: 6) {
-                Text(appState.folderURL == nil ? "No file open" : "No file selected")
+                Text(appState.roots.isEmpty ? "No file open" : "No file selected")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.primary)
-                Text(appState.folderURL == nil
+                Text(appState.roots.isEmpty
                      ? "Open a Markdown file or folder to get started"
                      : "Select a file from the sidebar")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            if appState.folderURL == nil {
+            if appState.roots.isEmpty {
                 Button("Open…") { appState.openPanel() }
                     .controlSize(.regular)
                     .padding(.top, 4)

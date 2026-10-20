@@ -23,9 +23,11 @@ enum FileLocationActions {
         copyString(FilePathDisplay.relativePath(of: url, in: root))
     }
 
-    /// Window subtitle for the selected file: in folder mode the folder name
-    /// plus the file's folder path inside it ("notes › 2026"; just "notes" for
-    /// a root-level file); otherwise the `~`-abbreviated parent folder.
+    /// Window subtitle for the selected file: inside a workspace root
+    /// (`folderRoot`, the root containing the file — see
+    /// `AppState.workspaceRoot(containing:)`) the root's name plus the file's
+    /// folder path inside it ("notes › 2026"; just "notes" for a root-level
+    /// file); otherwise the `~`-abbreviated parent folder.
     static func locationSubtitle(for url: URL, folderRoot: URL?) -> String {
         guard let root = folderRoot,
               FileNode.relativeComponents(of: url, under: root) != nil else {
