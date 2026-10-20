@@ -34,10 +34,11 @@ final class AppState: ObservableObject {
     @Published var showSidebar: Bool = false
 
     // Editable text for the currently open file. Edits are refused while the
-    // file is still being read (they would be overwritten by the read).
+    // file is still being read (they would be overwritten by the read) and
+    // for read-only (large) files.
     @Published var editingContent: String = "" {
         didSet {
-            if isReadingFile, editingContent != savedContent {
+            if isReadingFile || isReadOnly, editingContent != savedContent {
                 editingContent = savedContent
             }
         }
@@ -52,6 +53,11 @@ final class AppState: ObservableObject {
 
     /// True while the selected file's bytes are being read off the main thread.
     @Published private(set) var isReadingFile: Bool = false
+
+    /// True when the selected file is larger than
+    /// `MarkdownDocumentIO.largeFileThreshold`: it is shown, but editing and
+    /// saving are disabled to keep the app responsive.
+    @Published private(set) var isReadOnly: Bool = false
 
     /// Bumped on every selection; reads that complete for an older
     /// generation are dropped so a slow read can't replace a newer selection.
@@ -224,6 +230,7 @@ final class AppState: ObservableObject {
     private func clearSelection() {
         loadGeneration &+= 1 // drop any read still in flight
         isReadingFile = false
+        isReadOnly = false
         isLoading = false
         selectedFile = nil
         setContent("")
@@ -305,6 +312,9 @@ final class AppState: ObservableObject {
     private struct DiskSnapshot: @unchecked Sendable {
         let result: Result<MarkdownDocumentIO.Document, Error>
         let modificationDate: Date?
+        let size: Int?
+
+        var isLarge: Bool { (size ?? 0) > MarkdownDocumentIO.largeFileThreshold }
     }
 
     /// Reads off the main thread: an iCloud-evicted file blocks until it is
@@ -314,7 +324,10 @@ final class AppState: ObservableObject {
     ) async -> DiskSnapshot {
         await Task.detached(priority: .userInitiated) {
             let result = Result { try MarkdownDocumentIO.read(from: url, preferring: preferred) }
-            return DiskSnapshot(result: result, modificationDate: modificationDate(of: url))
+            return DiskSnapshot(
+                result: result,
+                modificationDate: modificationDate(of: url),
+                size: MarkdownDocumentIO.fileSize(of: url))
         }.value
     }
 
@@ -330,6 +343,7 @@ final class AppState: ObservableObject {
         stopWatchingFile()
         isLoading = true
         isReadingFile = true
+        isReadOnly = false
         loadErrorMessage = nil
         selectedFile = files.first(where: { $0 == file }) ?? file
         // Show the loading state rather than the previous file's text.
@@ -354,7 +368,15 @@ final class AppState: ObservableObject {
             if let idx = files.firstIndex(where: { $0.url == url }) {
                 files[idx].content = document.text
             }
+            isReadOnly = snapshot.isLarge
+            if isReadOnly, viewMode == .edit {
+                // The plain editor is unusable at this size; show the preview.
+                viewMode = .preview
+            }
             setContent(document.text)
+            if isReadOnly {
+                notifyOpenedReadOnly(name: url.lastPathComponent, size: snapshot.size ?? 0)
+            }
         case .failure(let error):
             currentFormat = .utf8
             loadedModificationDate = nil
@@ -400,7 +422,7 @@ final class AppState: ObservableObject {
     @discardableResult
     func saveCurrentFile() -> Bool {
         guard let file = selectedFile else { return false }
-        guard loadErrorMessage == nil, !isReadingFile else { return false }
+        guard loadErrorMessage == nil, !isReadingFile, !isReadOnly else { return false }
 
         // The file changed on disk since we loaded it — don't clobber the
         // other writer silently.
@@ -466,6 +488,23 @@ final class AppState: ObservableObject {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
+    /// Shown once per open of a file above the size limit. A sheet when a
+    /// window is available so it doesn't block the rest of the app.
+    private func notifyOpenedReadOnly(name: String, size: Int) {
+        let alert = NSAlert()
+        alert.messageText = "“\(name)” opened read-only"
+        alert.informativeText = "This file is \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)). "
+            + "Editing and saving are turned off for files over "
+            + "\(ByteCountFormatter.string(fromByteCount: Int64(MarkdownDocumentIO.largeFileThreshold), countStyle: .file)) "
+            + "to keep PreviewMD responsive. Use another editor to change it."
+        alert.alertStyle = .informational
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
     private func presentError(title: String, message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -522,6 +561,7 @@ final class AppState: ObservableObject {
                   case .success(let document) = snapshot.result else { return }
             self.currentFormat = document.format
             self.loadedModificationDate = snapshot.modificationDate
+            self.isReadOnly = self.isReadOnly || snapshot.isLarge
             if document.text != self.savedContent {
                 if let idx = self.files.firstIndex(where: { $0.url == url }) {
                     self.files[idx].content = document.text

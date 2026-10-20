@@ -149,6 +149,73 @@ public enum MarkdownDocumentIO {
         return makeDocument(text, encoding: String.Encoding(rawValue: raw), bom: false)
     }
 
+    // MARK: - Large files
+
+    /// Files above this size open read-only in the app: editing re-renders
+    /// the whole document on every keystroke.
+    public static let largeFileThreshold = 5 * 1024 * 1024
+
+    /// Size in bytes, or nil if it can't be determined.
+    public static func fileSize(of url: URL) -> Int? {
+        (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+    }
+
+    /// Reads at most `maxBytes` (cut back to the last complete line) without
+    /// loading the rest of the file. Used by Quick Look, which must stay fast
+    /// and within its memory budget on huge files.
+    public static func readPrefix(from url: URL, maxBytes: Int) throws -> (document: Document, isTruncated: Bool) {
+        let data: Data
+        do {
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            data = try handle.read(upToCount: maxBytes + 1) ?? Data()
+        } catch {
+            throw ReadError.unreadable(url, underlying: error)
+        }
+        guard data.count > maxBytes else {
+            return (try decode(data, from: url), false)
+        }
+        return (try decode(trimmedPrefix(of: data, maxBytes: maxBytes), from: url), true)
+    }
+
+    /// The first `maxBytes` of `data`, shortened so it ends on a line break
+    /// (or at least on a character boundary) and still decodes.
+    static func trimmedPrefix(of data: Data, maxBytes: Int) -> Data {
+        var prefix = Data(data.prefix(maxBytes))
+        let isUTF16LE = prefix.starts(with: [0xFF, 0xFE])
+        let isUTF16BE = prefix.starts(with: [0xFE, 0xFF])
+
+        if isUTF16LE || isUTF16BE {
+            if prefix.count % 2 != 0 { prefix.removeLast() }
+            // Code units start at even offsets (the BOM is two bytes).
+            var offset = prefix.count - 2
+            while offset >= 2 {
+                let unit = isUTF16LE
+                    ? UInt16(prefix[offset]) | UInt16(prefix[offset + 1]) << 8
+                    : UInt16(prefix[offset]) << 8 | UInt16(prefix[offset + 1])
+                if unit == 0x0A { return Data(prefix.prefix(offset + 2)) }
+                offset -= 2
+            }
+            // No line break: just don't end on a lone high surrogate.
+            if prefix.count >= 4 {
+                let last = prefix.count - 2
+                let unit = isUTF16LE
+                    ? UInt16(prefix[last]) | UInt16(prefix[last + 1]) << 8
+                    : UInt16(prefix[last]) << 8 | UInt16(prefix[last + 1])
+                if (0xD800...0xDBFF).contains(unit) { prefix.removeLast(2) }
+            }
+            return prefix
+        }
+
+        if let newline = prefix.lastIndex(of: 0x0A) {
+            return Data(prefix[...newline])
+        }
+        // One enormous line: back off to a UTF-8 character boundary.
+        while let last = prefix.last, last & 0xC0 == 0x80 { prefix.removeLast() }
+        if let last = prefix.last, last >= 0xC0 { prefix.removeLast() }
+        return prefix
+    }
+
     /// Re-reads a file whose format is already known (e.g. after an external
     /// change or our own save). Detection alone would flip an ASCII-only
     /// Latin-1 file to UTF-8 — and a later save with non-ASCII text would then

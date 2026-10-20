@@ -261,6 +261,53 @@ final class MarkdownDocumentIOTests: XCTestCase {
         XCTAssertEqual(try MarkdownDocumentIO.read(from: url, preferring: crlf).format, crlf)
     }
 
+    // MARK: - Prefix reads (Quick Look)
+
+    func testReadPrefixOfSmallFileIsComplete() throws {
+        let url = try writeFixture(Data("# small\n".utf8), name: "small.md")
+        let (doc, truncated) = try MarkdownDocumentIO.readPrefix(from: url, maxBytes: 1024)
+        XCTAssertFalse(truncated)
+        XCTAssertEqual(doc.text, "# small\n")
+    }
+
+    func testReadPrefixExactlyAtLimitIsNotTruncated() throws {
+        let url = try writeFixture(Data("12345\n".utf8), name: "exact.md")
+        XCTAssertFalse(try MarkdownDocumentIO.readPrefix(from: url, maxBytes: 6).isTruncated)
+    }
+
+    func testReadPrefixCutsAtLastLineBreak() throws {
+        let line = "- item with ünïcödé text 🚀\n"
+        let text = String(repeating: line, count: 2000)
+        let url = try writeFixture(Data(text.utf8), name: "big.md")
+        let limit = 10_000
+        let (doc, truncated) = try MarkdownDocumentIO.readPrefix(from: url, maxBytes: limit)
+        XCTAssertTrue(truncated)
+        XCTAssertTrue(doc.text.hasSuffix("\n"))
+        XCTAssertTrue(text.hasPrefix(doc.text))
+        XCTAssertLessThanOrEqual(doc.text.utf8.count, limit)
+        XCTAssertGreaterThan(doc.text.utf8.count, limit - line.utf8.count - 1)
+    }
+
+    func testReadPrefixOfSingleHugeLineEndsOnCharacterBoundary() throws {
+        let text = String(repeating: "한", count: 1000) // 3 bytes each
+        let url = try writeFixture(Data(text.utf8), name: "oneline-big.md")
+        let (doc, truncated) = try MarkdownDocumentIO.readPrefix(from: url, maxBytes: 1000)
+        XCTAssertTrue(truncated)
+        XCTAssertTrue(text.hasPrefix(doc.text))
+        XCTAssertEqual(doc.text.count, 333)
+    }
+
+    func testReadPrefixOfUTF16() throws {
+        let text = String(repeating: "línea 🚀\n", count: 500)
+        let data = Data([0xFE, 0xFF]) + text.data(using: .utf16BigEndian)!
+        let url = try writeFixture(data, name: "u16-big.md")
+        let (doc, truncated) = try MarkdownDocumentIO.readPrefix(from: url, maxBytes: 1001)
+        XCTAssertTrue(truncated)
+        XCTAssertEqual(doc.encoding, .utf16BigEndian)
+        XCTAssertTrue(text.hasPrefix(doc.text))
+        XCTAssertTrue(doc.text.hasSuffix("\n"))
+    }
+
     func testWriteCreatesMissingFile() throws {
         let url = tempDir.appendingPathComponent("new.md")
         try MarkdownDocumentIO.write("hello\n", to: url, format: .utf8)
