@@ -1,12 +1,88 @@
 // PreviewMD preview shell logic. Loaded via <script src> so the CSP can
 // drop script-src 'unsafe-inline'. Swift drives it with evaluateJavaScript
 // (render(), scroll requests), which CSP does not restrict.
-(function () {
-  if (window.marked && typeof marked.setOptions === "function") {
-    marked.setOptions({ gfm: true, breaks: false });
-  }
+//
+// Everything this script relies on is captured into private variables at
+// load time, before any document content exists. Rendered markdown can
+// contain elements with arbitrary ids, and named-element access would let
+// `<a id="webkit">` or `<a id="mermaid">` shadow window globals (DOM
+// clobbering) if we looked them up lazily.
+var markedAPI = window.marked || null;
+var purifyAPI = window.DOMPurify || null;
+var messageHandlers = (window.webkit && window.webkit.messageHandlers) || null;
+var contentEl = document.getElementById('previewmd-root');
+
+if (markedAPI && typeof markedAPI.setOptions === 'function') {
+  markedAPI.setOptions({ gfm: true, breaks: false });
+}
+
+function canPost(name) {
+  try { return !!(messageHandlers && messageHandlers[name]); } catch (e) { return false; }
+}
+
+function post(name, body) {
+  try {
+    if (messageHandlers && messageHandlers[name]) {
+      messageHandlers[name].postMessage(body);
+    }
+  } catch (e) {}
+}
+
+// ── Remote images ─────────────────────────────────────────────
+// The CSP blocks https: images by default. The app reloads the shell with an
+// https:-enabled img-src once the user opts in for a document; read the
+// policy actually in force rather than trusting any flag.
+var remoteImagesAllowed = (function () {
+  var meta = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+  var csp = meta ? (meta.getAttribute('content') || '') : '';
+  return /img-src[^;]*\shttps:/.test(csp);
 })();
 
+// Attributes whose URLs CSP img-src governs (src, srcset, poster, the legacy
+// background attribute, and url() inside style).
+var IMAGE_URL_ATTRS = ['src', 'srcset', 'poster', 'background', 'style'];
+var REMOTE_URL = /(^|[\s,('"])https?:\/\//i;
+var remoteRefCount = 0;
+
+if (purifyAPI && typeof purifyAPI.addHook === 'function') {
+  purifyAPI.addHook('afterSanitizeAttributes', function (node) {
+    if (!node.getAttribute) return;
+    for (var i = 0; i < IMAGE_URL_ATTRS.length; i++) {
+      var v = node.getAttribute(IMAGE_URL_ATTRS[i]);
+      if (v && REMOTE_URL.test(v)) { remoteRefCount++; break; }
+    }
+  });
+}
+
+var remoteBanner = null;
+function updateRemoteBanner(hasRemote) {
+  // Only meaningful in the app (Quick Look has no handler to opt in with).
+  var show = hasRemote && !remoteImagesAllowed && canPost('loadRemoteImages');
+  if (!show) {
+    if (remoteBanner) remoteBanner.hidden = true;
+    return;
+  }
+  if (!remoteBanner) {
+    remoteBanner = document.createElement('div');
+    remoteBanner.className = 'previewmd-remote-banner';
+    remoteBanner.setAttribute('role', 'status');
+    var label = document.createElement('span');
+    label.textContent = 'This document has remote images.';
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Load remote images';
+    button.addEventListener('click', function () {
+      button.disabled = true;
+      post('loadRemoteImages', true);
+    });
+    remoteBanner.appendChild(label);
+    remoteBanner.appendChild(button);
+    document.body.insertBefore(remoteBanner, contentEl);
+  }
+  remoteBanner.hidden = false;
+}
+
+// ── Mermaid ───────────────────────────────────────────────────
 // mermaid.min.js is ~3 MB, so it is injected only for documents that
 // actually contain a mermaid block.
 //
@@ -51,7 +127,7 @@ function ensureMermaid() {
 }
 
 function transformMermaidBlocks() {
-  var blocks = document.querySelectorAll('#content pre > code.language-mermaid');
+  var blocks = contentEl.querySelectorAll('pre > code.language-mermaid');
   blocks.forEach(function (code) {
     var pre = code.parentElement;
     if (!pre) return;
@@ -73,13 +149,13 @@ function showMermaidError(node, err) {
 var renderGeneration = 0;
 
 function runMermaid() {
-  var nodes = document.querySelectorAll('#content .mermaid');
+  var nodes = contentEl.querySelectorAll('.mermaid');
   if (!nodes.length) return;
   var generation = renderGeneration;
   ensureMermaid().then(function (api) {
     // The document may have re-rendered while the script was loading.
     if (generation !== renderGeneration) return;
-    var current = document.querySelectorAll('#content .mermaid');
+    var current = contentEl.querySelectorAll('.mermaid');
     if (!api) {
       current.forEach(function (n) { showMermaidError(n, 'Mermaid failed to load'); });
       return;
@@ -106,8 +182,9 @@ function runMermaid() {
   });
 }
 
+// ── TOC ───────────────────────────────────────────────────────
 function extractTOC() {
-  var nodes = document.querySelectorAll('#content h1, #content h2, #content h3');
+  var nodes = contentEl.querySelectorAll('h1, h2, h3');
   var entries = [];
   for (var i = 0; i < nodes.length; i++) {
     var el = nodes[i];
@@ -120,29 +197,24 @@ function extractTOC() {
       id: el.id
     });
   }
-  try {
-    if (window.webkit &&
-        window.webkit.messageHandlers &&
-        window.webkit.messageHandlers.tocUpdate) {
-      window.webkit.messageHandlers.tocUpdate.postMessage(entries);
-    }
-  } catch (e) {}
+  post('tocUpdate', entries);
 }
 
+// ── Render ────────────────────────────────────────────────────
 function render(md) {
-  var el = document.getElementById('content');
-  if (!el) return;
+  if (!contentEl) return;
   var scrollY = window.scrollY;
   renderGeneration++;
-  var text = typeof md === "string" ? md : String(md == null ? "" : md);
+  var text = typeof md === 'string' ? md : String(md == null ? '' : md);
   var html;
   try {
-    html = window.marked ? marked.parse(text) : text;
+    html = markedAPI ? markedAPI.parse(text) : text;
   } catch (e) {
-    html = "<pre>" + String(e) + "</pre>";
+    html = '<pre>' + String(e) + '</pre>';
   }
-  if (window.DOMPurify) {
-    html = DOMPurify.sanitize(html, {
+  remoteRefCount = 0;
+  if (purifyAPI) {
+    html = purifyAPI.sanitize(html, {
       ADD_ATTR: ['target'],
       FORBID_TAGS: ['style', 'iframe', 'form', 'object', 'embed'],
       FORBID_ATTR: ['onerror', 'onload', 'onclick']
@@ -154,7 +226,8 @@ function render(md) {
     esc.textContent = text;
     html = '<pre>' + esc.innerHTML + '</pre>';
   }
-  el.innerHTML = html;
+  contentEl.innerHTML = html;
+  updateRemoteBanner(remoteRefCount > 0);
 
   transformMermaidBlocks();
   runMermaid();
