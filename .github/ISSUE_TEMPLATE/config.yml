@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/ychani/Preview-md/security/advisories/new
+    about: Please report security issues privately — see SECURITY.md.
+  - name: Security policy
+    url: https://github.com/ychani/Preview-md/blob/develop/SECURITY.md
+    about: Supported versions and how vulnerability reports are handled.
