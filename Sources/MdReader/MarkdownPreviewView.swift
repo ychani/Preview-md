@@ -9,43 +9,90 @@ struct MarkdownPreviewView: NSViewRepresentable {
     var onTOCUpdate: (([TOCEntry]) -> Void)?
     var scrollRequest: ScrollRequest?
     var onWebViewReady: ((WKWebView?) -> Void)?
+    /// The file being previewed. Scopes the remote-images opt-in (which
+    /// resets when this changes).
+    var documentURL: URL?
+    /// Opens another local Markdown file the document links to (relative
+    /// `[x](other.md)`). Nil falls back to asking Launch Services to open the
+    /// file with this app.
+    var onOpenLocalFile: ((URL) -> Void)?
+    @AppStorage(PreviewSettings.zoomKey) private var zoom: Double = PreviewSettings.defaultZoom
+
+    init(
+        markdownText: String,
+        onRenderComplete: (() -> Void)? = nil,
+        onTOCUpdate: (([TOCEntry]) -> Void)? = nil,
+        scrollRequest: ScrollRequest? = nil,
+        onWebViewReady: ((WKWebView?) -> Void)? = nil,
+        documentURL: URL? = nil,
+        onOpenLocalFile: ((URL) -> Void)? = nil
+    ) {
+        self.markdownText = markdownText
+        self.onRenderComplete = onRenderComplete
+        self.onTOCUpdate = onTOCUpdate
+        self.scrollRequest = scrollRequest
+        self.onWebViewReady = onWebViewReady
+        self.documentURL = documentURL
+        self.onOpenLocalFile = onOpenLocalFile
+    }
+
+    private static let messageNames = ["tocUpdate", "loadRemoteImages", "openLocalFile"]
 
     func makeNSView(context: Context) -> WKWebView {
+        let coordinator = context.coordinator
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
-        config.userContentController.add(context.coordinator, name: "tocUpdate")
+        // No cookies, cache or storage written to disk, and nothing shared
+        // with other web views.
+        config.websiteDataStore = .nonPersistent()
+        // Relative images next to the document; must be registered before
+        // the web view is created.
+        config.setURLSchemeHandler(
+            coordinator.imageHandler, forURLScheme: LocalImageSchemeHandler.scheme)
+        for name in Self.messageNames {
+            config.userContentController.add(coordinator, name: name)
+        }
 
         let webView = WKWebView(frame: .zero, configuration: config)
-        webView.navigationDelegate = context.coordinator
+        webView.navigationDelegate = coordinator
         webView.setValue(false, forKey: "drawsBackground")
         // Let SwiftUI's parent `.onDrop` handle file drops instead of the
         // webview trying to navigate to the dropped file.
         webView.unregisterDraggedTypes()
+        webView.pageZoom = CGFloat(PreviewSettings.clamp(zoom))
 
-        if let htmlURL = MdReaderResources.previewHTMLURL {
-            let readRoot = htmlURL.deletingLastPathComponent()
-            webView.loadFileURL(htmlURL, allowingReadAccessTo: readRoot)
-        }
-
-        context.coordinator.webView = webView
-        context.coordinator.pendingMarkdown = markdownText
-        context.coordinator.onRenderComplete = onRenderComplete
-        context.coordinator.onTOCUpdate = onTOCUpdate
-        context.coordinator.onWebViewReady = onWebViewReady
+        coordinator.webView = webView
+        coordinator.pendingMarkdown = markdownText
+        coordinator.onRenderComplete = onRenderComplete
+        coordinator.onTOCUpdate = onTOCUpdate
+        coordinator.onWebViewReady = onWebViewReady
+        coordinator.onOpenLocalFile = onOpenLocalFile
+        coordinator.setDocument(documentURL)
+        coordinator.loadShell()
         onWebViewReady?(webView)
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        context.coordinator.onRenderComplete = onRenderComplete
-        context.coordinator.onTOCUpdate = onTOCUpdate
-        context.coordinator.onWebViewReady = onWebViewReady
-        context.coordinator.scheduleRender(markdownText)
-        context.coordinator.handleScrollRequest(scrollRequest)
+        let pageZoom = CGFloat(PreviewSettings.clamp(zoom))
+        if webView.pageZoom != pageZoom {
+            webView.pageZoom = pageZoom
+        }
+        let coordinator = context.coordinator
+        coordinator.onRenderComplete = onRenderComplete
+        coordinator.onTOCUpdate = onTOCUpdate
+        coordinator.onWebViewReady = onWebViewReady
+        coordinator.onOpenLocalFile = onOpenLocalFile
+        coordinator.setDocument(documentURL)
+        coordinator.revalidateRemoteOptIn(markdown: markdownText)
+        coordinator.scheduleRender(markdownText)
+        coordinator.handleScrollRequest(scrollRequest)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
-        webView.configuration.userContentController.removeScriptMessageHandler(forName: "tocUpdate")
+        for name in messageNames {
+            webView.configuration.userContentController.removeScriptMessageHandler(forName: name)
+        }
         coordinator.onWebViewReady?(nil)
     }
 
@@ -57,13 +104,86 @@ struct MarkdownPreviewView: NSViewRepresentable {
         var onRenderComplete: (() -> Void)?
         var onTOCUpdate: (([TOCEntry]) -> Void)?
         var onWebViewReady: ((WKWebView?) -> Void)?
-        private var lastRendered: String?
+        var onOpenLocalFile: ((URL) -> Void)?
+        let imageHandler = LocalImageSchemeHandler()
+        /// What was last sent to `render()`: the text and the image base it
+        /// was rendered with (a different folder must re-render).
+        private struct RenderKey: Equatable {
+            let markdown: String
+            let imageBase: String?
+        }
+        private var lastRendered: RenderKey?
         private var isLoaded = false
         private var debounceItem: DispatchWorkItem?
         private var lastScrollRequestID: UUID?
 
+        private var documentURL: URL?
+        /// `previewmd-local://<token>/` for the document's folder, or nil.
+        private var imageBase: String?
+
+        /// What a remote-images opt-in applies to: the document, or — when the
+        /// host passes no `documentURL` — the exact text, so the opt-in can
+        /// never leak to a different document.
+        private enum OptInScope: Equatable {
+            case document(URL)
+            case text(Int)
+        }
+        /// Set when the user clicked "Load remote images". In-memory only:
+        /// never persisted, and reset as soon as the scope changes.
+        private var remoteOptIn: OptInScope?
+        private var remoteImagesAllowed: Bool { remoteOptIn != nil }
+        /// The CSP mode of the shell currently loaded in the web view.
+        private var shellAllowsRemoteImages = false
+
+        // MARK: Document / shell
+
+        func setDocument(_ url: URL?) {
+            let normalized = url?.standardizedFileURL
+            guard normalized != documentURL else { return }
+            documentURL = normalized
+            imageBase = normalized.map {
+                imageHandler.register(folder: $0.deletingLastPathComponent())
+            }
+        }
+
+        private func currentScope(for markdown: String) -> OptInScope {
+            if let documentURL { return .document(documentURL) }
+            return .text(markdown.hashValue)
+        }
+
+        /// Drops the remote-images opt-in once the previewed document (or
+        /// text, without a document URL) is no longer the one it was granted
+        /// for, and reloads the strict shell.
+        func revalidateRemoteOptIn(markdown: String) {
+            guard let optIn = remoteOptIn, optIn != currentScope(for: markdown) else { return }
+            remoteOptIn = nil
+            loadShell()
+        }
+
+        /// Loads preview.html. A meta-tag CSP cannot be relaxed in place, so
+        /// switching remote images on or off means loading a fresh shell; the
+        /// pending markdown is re-rendered once it finishes loading.
+        func loadShell() {
+            guard let webView, let htmlURL = MdReaderResources.previewHTMLURL else { return }
+            isLoaded = false
+            lastRendered = nil
+            let readRoot = htmlURL.deletingLastPathComponent()
+            if remoteImagesAllowed,
+               let template = try? String(contentsOf: htmlURL, encoding: .utf8),
+               let html = MarkdownRenderBridge.previewShellHTML(
+                    template: template, allowRemoteImages: true) {
+                shellAllowsRemoteImages = true
+                webView.loadHTMLString(html, baseURL: htmlURL)
+            } else {
+                shellAllowsRemoteImages = false
+                webView.loadFileURL(htmlURL, allowingReadAccessTo: readRoot)
+            }
+        }
+
+        // MARK: Rendering
+
         func scheduleRender(_ markdown: String) {
-            if markdown == lastRendered { return }
+            if RenderKey(markdown: markdown, imageBase: imageBase) == lastRendered { return }
             pendingMarkdown = markdown
             debounceItem?.cancel()
             let item = DispatchWorkItem { [weak self] in
@@ -75,12 +195,13 @@ struct MarkdownPreviewView: NSViewRepresentable {
 
         private func flushRender() {
             guard isLoaded, let webView else { return }
-            let markdown = pendingMarkdown
-            guard let js = MarkdownRenderBridge.renderJS(for: markdown) else { return }
+            let key = RenderKey(markdown: pendingMarkdown, imageBase: imageBase)
+            guard let js = MarkdownRenderBridge.renderJS(
+                    for: key.markdown, imageBase: key.imageBase) else { return }
             webView.evaluateJavaScript(js) { [weak self] _, _ in
                 self?.onRenderComplete?()
             }
-            lastRendered = markdown
+            lastRendered = key
         }
 
         func handleScrollRequest(_ request: ScrollRequest?) {
@@ -96,6 +217,8 @@ struct MarkdownPreviewView: NSViewRepresentable {
             """
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
+
+        // MARK: WKNavigationDelegate
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoaded = true
@@ -113,9 +236,17 @@ struct MarkdownPreviewView: NSViewRepresentable {
         ) {
             let url = navigationAction.request.url
             if navigationAction.navigationType == .linkActivated, let url {
+                // preview.js handles #fragment and relative links itself; this
+                // is the backstop. Same-document fragment jumps may proceed.
+                if Self.isSameDocumentFragment(url, current: webView.url) {
+                    decisionHandler(.allow)
+                    return
+                }
                 if url.scheme == "http" || url.scheme == "https" || url.scheme == "mailto" {
                     NSWorkspace.shared.open(url)
                 }
+                // Everything else (file: links to non-Markdown files, other
+                // schemes) is cancelled.
                 decisionHandler(.cancel)
                 return
             }
@@ -132,9 +263,48 @@ struct MarkdownPreviewView: NSViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == "tocUpdate" else { return }
-            let entries = Self.parseTOC(message.body)
-            onTOCUpdate?(entries)
+            switch message.name {
+            case "tocUpdate":
+                onTOCUpdate?(Self.parseTOC(message.body))
+            case "openLocalFile":
+                guard let href = message.body as? String,
+                      let documentURL,
+                      let target = MarkdownRenderBridge.resolveMarkdownLink(
+                        href, documentURL: documentURL) else { return }
+                openLocalFile(target)
+            case "loadRemoteImages":
+                guard !remoteImagesAllowed else { return }
+                remoteOptIn = currentScope(for: pendingMarkdown)
+                if !shellAllowsRemoteImages { loadShell() }
+            default:
+                break
+            }
+        }
+
+        private func openLocalFile(_ url: URL) {
+            if let onOpenLocalFile {
+                onOpenLocalFile(url)
+                return
+            }
+            // No host callback: hand the file to Launch Services, aimed at
+            // this app when running as a bundle.
+            let app = Bundle.main.bundleURL
+            if app.pathExtension == "app" {
+                NSWorkspace.shared.open(
+                    [url], withApplicationAt: app,
+                    configuration: NSWorkspace.OpenConfiguration(),
+                    completionHandler: nil)
+            }
+        }
+
+        private static func isSameDocumentFragment(_ url: URL, current: URL?) -> Bool {
+            guard url.fragment != nil, let current,
+                  var target = URLComponents(url: url, resolvingAgainstBaseURL: true),
+                  var here = URLComponents(url: current, resolvingAgainstBaseURL: true)
+            else { return false }
+            target.fragment = nil
+            here.fragment = nil
+            return target == here
         }
 
         private static func parseTOC(_ body: Any) -> [TOCEntry] {

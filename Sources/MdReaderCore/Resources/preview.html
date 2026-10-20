@@ -2,138 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: file: https:; font-src 'self' data:;">
+<!-- Must match MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: false)
+     exactly: the app swaps it for the remote-images variant after opt-in. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src file:; style-src file: 'unsafe-inline'; img-src data: previewmd-local:; base-uri 'none'; form-action 'none'">
 <title>Preview</title>
 <link rel="stylesheet" href="preview.css">
 <script src="marked.min.js"></script>
 <script src="purify.min.js"></script>
 </head>
 <body>
-<article id="content" class="markdown-body"></article>
-<script>
-  (function () {
-    if (window.marked && typeof marked.setOptions === "function") {
-      marked.setOptions({ gfm: true, breaks: false });
-    }
-  })();
-
-  // mermaid.min.js is ~3 MB, so it is injected only for documents that
-  // actually contain a mermaid block.
-  var mermaidLoad = null;
-  function ensureMermaid(callback) {
-    if (window.mermaid) { callback(true); return; }
-    if (!mermaidLoad) {
-      mermaidLoad = new Promise(function (resolve) {
-        var script = document.createElement('script');
-        script.src = 'mermaid.min.js';
-        script.onload = function () {
-          try {
-            var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-            mermaid.initialize({
-              startOnLoad: false,
-              securityLevel: 'strict',
-              theme: isDark ? 'dark' : 'neutral'
-            });
-            resolve(true);
-          } catch (e) { resolve(false); }
-        };
-        script.onerror = function () { resolve(false); };
-        document.head.appendChild(script);
-      });
-    }
-    mermaidLoad.then(callback);
-  }
-
-  function transformMermaidBlocks() {
-    var blocks = document.querySelectorAll('#content pre > code.language-mermaid');
-    blocks.forEach(function (code) {
-      var pre = code.parentElement;
-      if (!pre) return;
-      var div = document.createElement('div');
-      div.className = 'mermaid';
-      div.textContent = code.textContent;
-      pre.replaceWith(div);
-    });
-  }
-
-  function runMermaid() {
-    var nodes = document.querySelectorAll('#content .mermaid');
-    if (!nodes.length) return;
-    ensureMermaid(function (loaded) {
-      if (!loaded || typeof mermaid.run !== 'function') return;
-      // The document may have re-rendered while the script was loading.
-      var current = document.querySelectorAll('#content .mermaid');
-      if (!current.length) return;
-      try {
-        mermaid.run({ nodes: current });
-      } catch (e) {
-        current.forEach(function (n) {
-          if (!n.dataset.processed) {
-            n.textContent = 'Mermaid error: ' + String(e && e.message ? e.message : e);
-            n.classList.add('mermaid-error');
-          }
-        });
-      }
-    });
-  }
-
-  function extractTOC() {
-    var nodes = document.querySelectorAll('#content h1, #content h2, #content h3');
-    var entries = [];
-    for (var i = 0; i < nodes.length; i++) {
-      var el = nodes[i];
-      if (!el.id) {
-        el.id = 'heading-' + i;
-      }
-      entries.push({
-        level: parseInt(el.tagName.substring(1), 10),
-        text: el.innerText || el.textContent || '',
-        id: el.id
-      });
-    }
-    try {
-      if (window.webkit &&
-          window.webkit.messageHandlers &&
-          window.webkit.messageHandlers.tocUpdate) {
-        window.webkit.messageHandlers.tocUpdate.postMessage(entries);
-      }
-    } catch (e) {}
-  }
-
-  function render(md) {
-    var el = document.getElementById('content');
-    if (!el) return;
-    var scrollY = window.scrollY;
-    var text = typeof md === "string" ? md : String(md == null ? "" : md);
-    var html;
-    try {
-      html = window.marked ? marked.parse(text) : text;
-    } catch (e) {
-      html = "<pre>" + String(e) + "</pre>";
-    }
-    if (window.DOMPurify) {
-      html = DOMPurify.sanitize(html, {
-        ADD_ATTR: ['target'],
-        FORBID_TAGS: ['style', 'iframe', 'form', 'object', 'embed'],
-        FORBID_ATTR: ['onerror', 'onload', 'onclick']
-      });
-    } else {
-      // Fail closed: without the sanitizer, never inject markup — show the
-      // raw markdown as escaped plain text instead.
-      var esc = document.createElement('div');
-      esc.textContent = text;
-      html = '<pre>' + esc.innerHTML + '</pre>';
-    }
-    el.innerHTML = html;
-
-    transformMermaidBlocks();
-    runMermaid();
-    extractTOC();
-
-    window.scrollTo(0, scrollY);
-  }
-
-  window.render = render;
-</script>
+<article id="previewmd-root" class="markdown-body"></article>
+<script src="preview.js"></script>
 </body>
 </html>
