@@ -1,4 +1,5 @@
 import AppKit
+import MdReaderCore
 import SwiftUI
 
 @main
@@ -9,6 +10,21 @@ struct MdReaderApp: App {
     private func recentLabel(for url: URL) -> String {
         let name = url.lastPathComponent
         return name.isEmpty ? url.path : name
+    }
+
+    /// Standard About panel with the bundled third-party notices as Credits.
+    private static func showAboutPanel() {
+        var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+        if let url = MdReaderResources.url(forResource: "THIRD_PARTY_NOTICES", withExtension: "md"),
+           let text = try? String(contentsOf: url, encoding: .utf8) {
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: NSFont.monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+            ]
+            options[.credits] = NSAttributedString(string: text, attributes: attributes)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(options: options)
     }
 
     var body: some Scene {
@@ -26,6 +42,11 @@ struct MdReaderApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About PreviewMD") {
+                    Self.showAboutPanel()
+                }
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Open…") {
                     appState.openPanel()
