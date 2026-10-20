@@ -68,6 +68,11 @@ struct MdReaderApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
 
+                Button("Add Folder to Workspace…") {
+                    appState.addFolderPanel()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .option])
+
                 Menu("Open Recent") {
                     ForEach(appState.recentURLs, id: \.self) { url in
                         Button(recentLabel(for: url)) {
@@ -239,6 +244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func deliver(_ urls: [URL], to state: AppState) {
         if urls.count == 1, let url = urls.first {
             state.open(url: url)
+        } else if urls.count > 1, urls.allSatisfy(AppState.isDirectory) {
+            // Several folders: open them together as the workspace.
+            state.openFolders(urls)
         } else if urls.count > 1 {
             state.openDroppedFiles(urls)
         }
