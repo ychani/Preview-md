@@ -149,6 +149,34 @@ public enum MarkdownDocumentIO {
         return makeDocument(text, encoding: String.Encoding(rawValue: raw), bom: false)
     }
 
+    /// Re-reads a file whose format is already known (e.g. after an external
+    /// change or our own save). Detection alone would flip an ASCII-only
+    /// Latin-1 file to UTF-8 — and a later save with non-ASCII text would then
+    /// change its encoding silently — so `preferred` is kept whenever it still
+    /// reproduces the file's bytes exactly.
+    public static func read(from url: URL, preferring preferred: Format?) throws -> Document {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw ReadError.unreadable(url, underlying: error)
+        }
+        return try decode(data, from: url, preferring: preferred)
+    }
+
+    public static func decode(_ data: Data, from url: URL, preferring preferred: Format?) throws -> Document {
+        let detected = try decode(data, from: url)
+        guard let preferred, preferred != detected.format else { return detected }
+        var candidate = preferred
+        if dominantLineEnding(in: detected.text) != nil {
+            candidate.lineEnding = detected.format.lineEnding
+        }
+        if let reencoded = try? encode(detected.text, format: candidate, for: url), reencoded == data {
+            return Document(text: detected.text, format: candidate)
+        }
+        return detected
+    }
+
     private static func makeDocument(_ raw: String, encoding: String.Encoding, bom: Bool) -> Document {
         let ending = dominantLineEnding(in: raw) ?? .lf
         let text: String

@@ -472,7 +472,13 @@ final class AppState: ObservableObject {
             watchFile(at: url) // re-arm across atomic renames
             return
         }
-        guard let document = try? MarkdownDocumentIO.read(from: url) else { return }
+        // Our own save (or a no-op touch): nothing to reload. Re-reading here
+        // would also re-run encoding detection on our own bytes.
+        if let loaded = loadedModificationDate, modificationDate(of: url) == loaded {
+            watchFile(at: url)
+            return
+        }
+        guard let document = try? MarkdownDocumentIO.read(from: url, preferring: currentFormat) else { return }
         currentFormat = document.format
         loadedModificationDate = modificationDate(of: url)
         if document.text != savedContent {

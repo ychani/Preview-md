@@ -232,6 +232,35 @@ final class MarkdownDocumentIOTests: XCTestCase {
         XCTAssertEqual(type, .typeSymbolicLink)
     }
 
+    // MARK: - Re-reads keep the known format
+
+    func testASCIIOnlyLatin1FileKeepsLatin1AfterOwnSave() throws {
+        let latin1 = MarkdownDocumentIO.Format(encoding: .isoLatin1)
+        let url = try writeFixture(Data(), name: "ascii-latin1.md")
+        // Our own save of ASCII-only text: the bytes are valid UTF-8 too.
+        try MarkdownDocumentIO.write("plain ascii\n", to: url, format: latin1)
+        XCTAssertEqual(try MarkdownDocumentIO.read(from: url).encoding, .utf8) // plain detection
+        let reread = try MarkdownDocumentIO.read(from: url, preferring: latin1)
+        XCTAssertEqual(reread.format, latin1)
+
+        // A later non-ASCII save therefore stays Latin-1.
+        try MarkdownDocumentIO.write(reread.text + "caf\u{00E9}\n", to: url, format: reread.format)
+        XCTAssertEqual(try Data(contentsOf: url), "plain ascii\ncaf\u{00E9}\n".data(using: .isoLatin1))
+    }
+
+    func testPreferredFormatIsDroppedWhenFileWasReencodedExternally() throws {
+        let url = try writeFixture(Data("caf\u{00E9}\n".utf8), name: "now-utf8.md")
+        let doc = try MarkdownDocumentIO.read(from: url, preferring: .init(encoding: .isoLatin1))
+        XCTAssertEqual(doc.encoding, .utf8)
+        XCTAssertEqual(doc.text, "caf\u{00E9}\n")
+    }
+
+    func testPreferredLineEndingKeptWhenFileHasNoLineBreaks() throws {
+        let url = try writeFixture(Data("one line".utf8), name: "oneline.md")
+        let crlf = MarkdownDocumentIO.Format(encoding: .utf8, lineEnding: .crlf)
+        XCTAssertEqual(try MarkdownDocumentIO.read(from: url, preferring: crlf).format, crlf)
+    }
+
     func testWriteCreatesMissingFile() throws {
         let url = tempDir.appendingPathComponent("new.md")
         try MarkdownDocumentIO.write("hello\n", to: url, format: .utf8)
