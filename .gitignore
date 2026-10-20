@@ -28,3 +28,6 @@ dist/
 .idea/
 *.swp
 *.swo
+
+# Local agent / tool state
+.claude/
