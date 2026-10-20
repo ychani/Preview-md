@@ -1,18 +1,14 @@
 import Foundation
 
+/// A Markdown file shown in the sidebar. Contents are not cached here — the
+/// selected file's text lives in `AppState.editingContent`.
 struct MarkdownFile: Identifiable, Equatable {
     let url: URL
-    var content: String
 
     var id: URL { url }
     var name: String { url.lastPathComponent }
 
-    init(url: URL, content: String = "") {
+    init(url: URL) {
         self.url = url
-        self.content = content
-    }
-
-    static func == (lhs: MarkdownFile, rhs: MarkdownFile) -> Bool {
-        lhs.url == rhs.url
     }
 }

@@ -9,8 +9,6 @@ private let kBookmarkKey = "FolderSecurityBookmark"
 private let kRecentsKey = "RecentFileURLs"
 private let kMaxRecents = 10
 
-private let kMarkdownExtensions: Set<String> = ["md", "markdown"]
-
 /// The sidebar can display one of two populations: the contents of a folder the
 /// user opened, or an ad-hoc list of explicitly-opened files (picker, drag,
 /// Finder double-click).
@@ -136,11 +134,26 @@ final class AppState: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.prompt = "Open"
         panel.message = "Choose a Markdown file or a folder of Markdown files."
-        var types: [UTType] = [.plainText]
-        if let md = UTType(filenameExtension: "md") { types.insert(md, at: 0) }
-        panel.allowedContentTypes = types
+        panel.allowedContentTypes = MarkdownDocumentIO.markdownExtensions
+            .sorted()
+            .compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         open(url: url)
+    }
+
+    /// The single rule for what PreviewMD opens: an existing Markdown file
+    /// (by extension, see `MarkdownDocumentIO.markdownExtensions`), or — where
+    /// allowed — a folder. Used by `open(url:)` and `openDroppedFiles(_:)`.
+    static func canOpen(_ url: URL, allowingDirectories: Bool) -> Bool {
+        guard url.isFileURL else { return false }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            return false
+        }
+        if isDirectory.boolValue {
+            return allowingDirectories
+        }
+        return MarkdownDocumentIO.isMarkdownFile(url)
     }
 
     /// Routes an arbitrary URL (from the open panel, `onOpenURL`, or Finder
@@ -152,6 +165,10 @@ final class AppState: ObservableObject {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
             removeRecent(url)
+            return
+        }
+        guard Self.canOpen(url, allowingDirectories: true) else {
+            NSSound.beep()
             return
         }
         if isDir.boolValue {
@@ -182,9 +199,9 @@ final class AppState: ObservableObject {
     /// onto the window or Dock icon. Preserves existing entries, dedupes by
     /// standardized URL, and reveals the sidebar.
     func openDroppedFiles(_ urls: [URL]) {
-        let markdownURLs = urls.filter {
-            kMarkdownExtensions.contains($0.pathExtension.lowercased())
-        }
+        let markdownURLs = urls
+            .filter { Self.canOpen($0, allowingDirectories: false) }
+            .map { $0.standardizedFileURL }
         guard !markdownURLs.isEmpty else { return }
         hasOpenedDocument = true
 
@@ -195,12 +212,12 @@ final class AppState: ObservableObject {
             sidebarMode = .openedFiles
         }
 
-        let existing = Set(files.map { $0.url.standardizedFileURL })
+        // Updated as we go so duplicates within the same drop are skipped too.
+        var seen = Set(files.map { $0.url.standardizedFileURL })
         var firstNew: MarkdownFile?
         for url in markdownURLs {
-            let std = url.standardizedFileURL
-            if existing.contains(std) { continue }
-            let file = MarkdownFile(url: std)
+            guard seen.insert(url).inserted else { continue }
+            let file = MarkdownFile(url: url)
             files.append(file)
             if firstNew == nil { firstNew = file }
         }
@@ -264,7 +281,7 @@ final class AppState: ObservableObject {
             // Contents are loaded lazily in selectFile — listing a large folder
             // must not read every file up front.
             files = contents
-                .filter { kMarkdownExtensions.contains($0.pathExtension.lowercased()) }
+                .filter { MarkdownDocumentIO.isMarkdownFile($0) }
                 .sorted { $0.lastPathComponent.lowercased() < $1.lastPathComponent.lowercased() }
                 .map { MarkdownFile(url: $0) }
         } catch {
@@ -372,9 +389,6 @@ final class AppState: ObservableObject {
         case .success(let document):
             currentFormat = document.format
             loadedModificationDate = snapshot.modificationDate
-            if let idx = files.firstIndex(where: { $0.url == url }) {
-                files[idx].content = document.text
-            }
             isReadOnly = snapshot.isLarge
             if isReadOnly, viewMode == .edit {
                 // The plain editor is unusable at this size; show the preview.
@@ -479,9 +493,6 @@ final class AppState: ObservableObject {
             return false
         }
 
-        if let idx = files.firstIndex(of: file) {
-            files[idx].content = editingContent
-        }
         savedContent = editingContent
         loadedModificationDate = modificationDate(of: file.url)
         return true
@@ -570,9 +581,6 @@ final class AppState: ObservableObject {
             self.loadedModificationDate = snapshot.modificationDate
             self.isReadOnly = self.isReadOnly || snapshot.isLarge
             if document.text != self.savedContent {
-                if let idx = self.files.firstIndex(where: { $0.url == url }) {
-                    self.files[idx].content = document.text
-                }
                 self.setContent(document.text)
             }
         }

@@ -149,6 +149,17 @@ public enum MarkdownDocumentIO {
         return makeDocument(text, encoding: String.Encoding(rawValue: raw), bom: false)
     }
 
+    // MARK: - What counts as Markdown
+
+    /// File extensions PreviewMD treats as Markdown (lowercased).
+    public static let markdownExtensions: Set<String> = ["md", "markdown", "mdown", "mkd", "mkdn"]
+
+    /// True if `url` names a Markdown file by extension (case-insensitive).
+    /// Says nothing about whether the file exists.
+    public static func isMarkdownFile(_ url: URL) -> Bool {
+        markdownExtensions.contains(url.pathExtension.lowercased())
+    }
+
     // MARK: - Large files
 
     /// Files above this size open read-only in the app: editing re-renders

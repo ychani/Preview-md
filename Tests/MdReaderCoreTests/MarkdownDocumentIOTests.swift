@@ -308,6 +308,15 @@ final class MarkdownDocumentIOTests: XCTestCase {
         XCTAssertTrue(doc.text.hasSuffix("\n"))
     }
 
+    func testIsMarkdownFile() {
+        for name in ["a.md", "b.MD", "c.markdown", "d.mdown", "e.mkd", "f.mkdn", "dir/g.Markdown"] {
+            XCTAssertTrue(MarkdownDocumentIO.isMarkdownFile(URL(fileURLWithPath: "/tmp/\(name)")), name)
+        }
+        for name in ["a.txt", "b.mdx", "README", "c.md.bak", ".md"] {
+            XCTAssertFalse(MarkdownDocumentIO.isMarkdownFile(URL(fileURLWithPath: "/tmp/\(name)")), name)
+        }
+    }
+
     func testWriteCreatesMissingFile() throws {
         let url = tempDir.appendingPathComponent("new.md")
         try MarkdownDocumentIO.write("hello\n", to: url, format: .utf8)
