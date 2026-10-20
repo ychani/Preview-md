@@ -116,9 +116,14 @@ final class AppState: ObservableObject {
 
     var isDirty: Bool { editingContent != savedContent }
 
+    /// Set by any explicit open (Finder, Dock, panel, recents, drop) so the
+    /// deferred last-folder restore never replaces it.
+    private var hasOpenedDocument = false
+    private var launchObserver: NSObjectProtocol?
+
     init() {
         loadRecents()
-        restoreBookmark()
+        scheduleLastFolderRestore()
     }
 
     // MARK: – Open (file or folder)
@@ -143,6 +148,7 @@ final class AppState: ObservableObject {
     /// hides the sidebar; a folder open shows it. Nothing is recorded (recents,
     /// bookmark) if the user cancels the unsaved-changes prompt.
     func open(url: URL) {
+        hasOpenedDocument = true
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
             removeRecent(url)
@@ -180,6 +186,7 @@ final class AppState: ObservableObject {
             kMarkdownExtensions.contains($0.pathExtension.lowercased())
         }
         guard !markdownURLs.isEmpty else { return }
+        hasOpenedDocument = true
 
         // Drops discard any previously-loaded folder context.
         if sidebarMode == .folder {
@@ -605,37 +612,73 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: – Bookmark persistence
+    // MARK: – Last-folder restore
 
+    // The app is not sandboxed, so a plain bookmark (which survives renames
+    // and moves) is all that's needed — no security scope.
     private func saveBookmark(for url: URL) {
-        do {
-            let data = try url.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil)
-            UserDefaults.standard.set(data, forKey: kBookmarkKey)
-        } catch {
-            // Bookmark creation can fail in sandboxed contexts; not fatal
+        guard let data = try? url.bookmarkData(
+            options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        else { return }
+        UserDefaults.standard.set(data, forKey: kBookmarkKey)
+    }
+
+    private func clearBookmark() {
+        UserDefaults.standard.removeObject(forKey: kBookmarkKey)
+    }
+
+    /// Reopens the last folder once launch has finished — but only if launch
+    /// didn't open something itself (Finder double-click, Dock drop, `open`),
+    /// which would otherwise be clobbered or flash the folder first.
+    private func scheduleLastFolderRestore() {
+        guard UserDefaults.standard.data(forKey: kBookmarkKey) != nil else { return }
+        let deferRestore = { [weak self] in
+            // Launch-time opens are delivered asynchronously after the window
+            // appears; give them a beat to land.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated { self?.restoreLastFolderIfIdle() }
+            }
+        }
+        if NSRunningApplication.current.isFinishedLaunching {
+            deferRestore()
+        } else {
+            launchObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didFinishLaunchingNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    if let observer = self?.launchObserver {
+                        NotificationCenter.default.removeObserver(observer)
+                        self?.launchObserver = nil
+                    }
+                }
+                deferRestore()
+            }
         }
     }
 
-    private func restoreBookmark() {
+    private func restoreLastFolderIfIdle() {
+        guard !hasOpenedDocument, selectedFile == nil, files.isEmpty, folderURL == nil else { return }
         guard let data = UserDefaults.standard.data(forKey: kBookmarkKey) else { return }
-        do {
-            var stale = false
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: .withSecurityScope,
-                relativeTo: nil,
-                bookmarkDataIsStale: &stale)
-            guard url.startAccessingSecurityScopedResource() else { return }
-            if stale {
-                saveBookmark(for: url)
-            }
-            loadFolder(url)
-        } catch {
-            UserDefaults.standard.removeObject(forKey: kBookmarkKey)
+        var stale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data, options: [.withoutUI],
+            relativeTo: nil, bookmarkDataIsStale: &stale)
+        else {
+            clearBookmark()
+            return
         }
+        // Gone, not a folder, or unreadable (e.g. permission denied): forget
+        // it quietly instead of alerting on every launch.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) != nil
+        else {
+            clearBookmark()
+            return
+        }
+        if stale { saveBookmark(for: url) }
+        loadFolder(url)
     }
 
     // MARK: – Recent files
