@@ -9,11 +9,77 @@
 // clobbering) if we looked them up lazily.
 var markedAPI = window.marked || null;
 var purifyAPI = window.DOMPurify || null;
+var extensionsAPI = window.PreviewMDExtensions || null;
 var messageHandlers = (window.webkit && window.webkit.messageHandlers) || null;
 var contentEl = document.getElementById('previewmd-root');
 
 if (markedAPI && typeof markedAPI.setOptions === 'function') {
   markedAPI.setOptions({ gfm: true, breaks: false });
+}
+
+// ── Wikilinks / front matter (markdown-extensions.js) ─────────
+// Swift contract (all optional; call before render(), like setImageBase —
+// neither setter re-renders on its own):
+//
+//   setWikiLinks(map)      map: { "<target>": { path: "<root-relative path>",
+//                                              kind: "note" | "image" } | null }
+//                          <target> is the text between `[[` (or `![[`) and
+//                          the first `#` or `|`, whitespace-trimmed, exactly as
+//                          written (a trailing `\` from an escaped table pipe
+//                          is dropped). A target that is absent or null renders
+//                          as missing (data-state="missing"; a missing-image
+//                          placeholder for embeds). setWikiLinks(null) — the
+//                          default — means "no resolution available": links
+//                          render with data-state="unknown" (styled as normal
+//                          links) and image embeds fall back to
+//                          document-relative srcs.
+//   setImageRootBase(base) `previewmd-local://<token>/` serving the folder the
+//                          map's paths are relative to. Null (the default)
+//                          falls back to the document's image base, so nothing
+//                          changes until Swift provides it.
+//
+// Clicking (or pressing Enter on) a wikilink posts
+// webkit.messageHandlers.openWikiLink.postMessage("<target>" or
+// "<target>#<heading>") when that handler exists. `[[#heading]]` links into
+// the current document scroll locally instead.
+var wikiLinkMap = null;
+function setWikiLinks(map) {
+  if (!map || typeof map !== 'object') { wikiLinkMap = null; return; }
+  var copy = Object.create(null);
+  Object.keys(map).forEach(function (key) {
+    var v = map[key];
+    copy[key] = (v && typeof v === 'object' && typeof v.path === 'string' &&
+                 (v.kind === 'note' || v.kind === 'image'))
+      ? { path: v.path, kind: v.kind } : null;
+  });
+  wikiLinkMap = copy;
+}
+window.setWikiLinks = setWikiLinks;
+
+// Random per-shell token marking the <img> elements the embed renderer
+// produces as root-relative. Raw HTML in a document cannot guess it, so it
+// cannot widen its own images' reach from the document folder to the root.
+var rootRelativeMarker = (function () {
+  try {
+    var a = new Uint32Array(4);
+    window.crypto.getRandomValues(a);
+    return Array.prototype.map.call(a, function (n) { return n.toString(36); }).join('');
+  } catch (e) {
+    return String(Math.random()).slice(2) + String(Date.now());
+  }
+})();
+
+if (extensionsAPI && markedAPI && typeof extensionsAPI.install === 'function') {
+  try {
+    extensionsAPI.install(markedAPI, {
+      mode: 'app',
+      rootRelativeMarker: rootRelativeMarker,
+      resolve: function (target) {
+        if (wikiLinkMap === null) return undefined;
+        return Object.prototype.hasOwnProperty.call(wikiLinkMap, target) ? wikiLinkMap[target] : null;
+      }
+    });
+  } catch (e) {}
 }
 
 function canPost(name) {
@@ -55,6 +121,13 @@ function setImageBase(base) {
 }
 window.setImageBase = setImageBase;
 
+// Base for root-relative wikilink embeds (see setWikiLinks above).
+var imageRootBase = null;
+function setImageRootBase(base) {
+  imageRootBase = (typeof base === 'string' && /^previewmd-local:\/\/[a-z0-9-]+\/$/.test(base)) ? base : null;
+}
+window.setImageRootBase = setImageRootBase;
+
 function isRelativeURL(s) {
   return !/^[a-z][a-z0-9+.\-]*:/i.test(s) && !/^[\/\\#]/.test(s);
 }
@@ -62,21 +135,28 @@ function isRelativeURL(s) {
 // Resolve against a sentinel root; if the result leaves it, the path used
 // ../ to climb out of the document folder and is refused.
 var LOCAL_PROBE_ROOT = '/__previewmd_root__/';
-function localImageURL(src) {
-  if (!imageBase) return null;
+function localImageURL(src, base) {
+  if (!base) return null;
   var u;
   try { u = new URL(src, 'previewmd-local://probe' + LOCAL_PROBE_ROOT); } catch (e) { return null; }
   if (u.protocol !== 'previewmd-local:' || u.host !== 'probe') return null;
   if (u.pathname.indexOf(LOCAL_PROBE_ROOT) !== 0) return null;
   var rel = u.pathname.slice(LOCAL_PROBE_ROOT.length);
-  return rel ? imageBase + rel : null;
+  return rel ? base + rel : null;
 }
 
 function rewriteLocalImage(node) {
   if (node.nodeName !== 'IMG') return;
+  // Wikilink embeds carry the marker: their src is relative to the image
+  // root (the opened folder) rather than to the document's own folder.
+  var rootRelative = false;
+  if (node.hasAttribute('data-previewmd-root-relative')) {
+    rootRelative = node.getAttribute('data-previewmd-root-relative') === rootRelativeMarker;
+    node.removeAttribute('data-previewmd-root-relative');
+  }
   var src = (node.getAttribute('src') || '').trim();
   if (!src || !isRelativeURL(src)) return;
-  var local = localImageURL(src);
+  var local = localImageURL(src, rootRelative ? (imageRootBase || imageBase) : imageBase);
   if (local) {
     node.setAttribute('src', local);
   } else {
@@ -298,6 +378,37 @@ document.addEventListener('click', function (ev) {
     post('openLocalFile', href);
   }
   // Other local files (PDFs, source files, ...) stay inert.
+}, true);
+
+// Wikilinks are <a> elements without href (see setWikiLinks above).
+function activateWikiLink(el) {
+  var ref = el.getAttribute('data-wikilink') || '';
+  if (ref.charAt(0) === '#') {
+    scrollToFragment(slugify(ref.slice(1)));
+    return;
+  }
+  if (ref) post('openWikiLink', ref);
+}
+
+function wikiLinkFromEvent(ev) {
+  var a = ev.target && ev.target.closest ? ev.target.closest('a.wikilink[data-wikilink]') : null;
+  return a && contentEl.contains(a) ? a : null;
+}
+
+document.addEventListener('click', function (ev) {
+  if (ev.defaultPrevented || ev.button !== 0) return;
+  var a = wikiLinkFromEvent(ev);
+  if (!a) return;
+  ev.preventDefault();
+  activateWikiLink(a);
+}, true);
+
+document.addEventListener('keydown', function (ev) {
+  if (ev.key !== 'Enter' || ev.defaultPrevented) return;
+  var a = wikiLinkFromEvent(ev);
+  if (!a) return;
+  ev.preventDefault();
+  activateWikiLink(a);
 }, true);
 
 // ── TOC ───────────────────────────────────────────────────────

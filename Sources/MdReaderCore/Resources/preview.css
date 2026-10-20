@@ -366,6 +366,95 @@ details[open] summary { margin-bottom: 0.5em; }
   white-space: pre-wrap;
 }
 
+/* ── Front matter (markdown-extensions.js) ──────────────────── */
+.front-matter {
+  margin: 0 0 1.75em;
+}
+
+.front-matter table {
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  font-size: 0.82em;
+  line-height: 1.5;
+  border-radius: 6px;
+  color: var(--fg-muted);
+}
+
+.front-matter th,
+.front-matter td {
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.front-matter th {
+  font-size: 1em;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg-faint);
+  background: var(--bg-table-head);
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.front-matter tr:last-child th,
+.front-matter tr:last-child td { border-bottom: none; }
+
+.front-matter tbody tr:hover { background: transparent; }
+
+.front-matter code { font-size: 0.95em; white-space: pre-wrap; }
+
+.front-matter-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  white-space: normal;
+}
+
+.front-matter-list li {
+  display: inline-block;
+  margin: 1px 4px 1px 0;
+  padding: 0 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+}
+
+/* ── Wikilinks ──────────────────────────────────────────────── */
+a.wikilink {
+  cursor: pointer;
+}
+
+a.wikilink[data-state="missing"] {
+  color: var(--fg-muted);
+  opacity: 0.75;
+  text-decoration: underline dashed;
+  text-decoration-thickness: 1px;
+}
+
+a.wikilink[data-state="missing"]:hover { color: var(--fg); opacity: 1; }
+
+a.wikilink:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* Quick Look renders wikilinks as plain spans (no navigation there). */
+span.wikilink { color: var(--link); }
+
+.wikilink-missing-image {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 4px;
+  color: var(--fg-faint);
+  font-size: 0.85em;
+}
+
 /* ── Remote-images banner ───────────────────────────────────── */
 .previewmd-remote-banner {
   display: flex;

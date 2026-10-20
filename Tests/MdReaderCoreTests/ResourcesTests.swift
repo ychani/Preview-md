@@ -20,6 +20,7 @@ final class ResourcesTests: XCTestCase {
             ("preview", "css"),
             ("marked.min", "js"),
             ("purify.min", "js"),
+            ("markdown-extensions", "js"),
             ("mermaid.min", "js"),
             ("THIRD_PARTY_NOTICES", "md"),
         ]
@@ -29,6 +30,16 @@ final class ResourcesTests: XCTestCase {
             let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int
             XCTAssertGreaterThan(size ?? 0, 0, "\(name).\(ext) is empty")
         }
+    }
+
+    /// preview.js captures PreviewMDExtensions at load, so the extensions
+    /// script must come first.
+    func testPreviewHTMLLoadsExtensionsBeforePreviewJS() throws {
+        let url = try XCTUnwrap(MdReaderResources.previewHTMLURL)
+        let html = try String(contentsOf: url, encoding: .utf8)
+        let ext = try XCTUnwrap(html.range(of: "<script src=\"markdown-extensions.js\"></script>"))
+        let shell = try XCTUnwrap(html.range(of: "<script src=\"preview.js\"></script>"))
+        XCTAssertLessThan(ext.lowerBound, shell.lowerBound)
     }
 
     func testMissingResourceReturnsNil() {
