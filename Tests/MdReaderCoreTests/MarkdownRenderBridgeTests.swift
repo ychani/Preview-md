@@ -64,21 +64,23 @@ final class PreviewContentSecurityPolicyTests: XCTestCase {
     func testStrictPolicyBlocksRemoteAndInlineScript() {
         let csp = MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: false)
         XCTAssertTrue(csp.contains("default-src 'none'"))
-        XCTAssertTrue(csp.contains("script-src 'self';"))
+        XCTAssertTrue(csp.contains("script-src file:;"))
+        // WebKit lets 'self' in a file: document match any URL.
+        XCTAssertFalse(csp.contains("'self'"))
         XCTAssertFalse(csp.contains("unsafe-eval"))
         XCTAssertFalse(csp.contains("https:"))
-        XCTAssertFalse(csp.contains("file:"))
-        XCTAssertTrue(csp.contains("img-src 'self' data: previewmd-local:;"))
+        XCTAssertTrue(csp.contains("img-src data: previewmd-local:;"))
         XCTAssertTrue(csp.contains("base-uri 'none'"))
         XCTAssertTrue(csp.contains("form-action 'none'"))
         // Only style-src may be unsafe-inline (Mermaid injects <style>).
         XCTAssertEqual(csp.components(separatedBy: "'unsafe-inline'").count, 2)
-        XCTAssertTrue(csp.contains("style-src 'self' 'unsafe-inline'"))
+        XCTAssertTrue(csp.contains("style-src file: 'unsafe-inline'"))
     }
 
     func testOptInPolicyAddsHttpsToImagesOnly() {
         let csp = MarkdownRenderBridge.contentSecurityPolicy(allowRemoteImages: true)
-        XCTAssertTrue(csp.contains("img-src 'self' data: previewmd-local: https:;"))
+        XCTAssertTrue(csp.contains("img-src data: previewmd-local: https:;"))
+        XCTAssertFalse(csp.contains("'self'"))
         XCTAssertEqual(csp.components(separatedBy: "https:").count, 2, "https: must appear only in img-src")
         XCTAssertFalse(csp.contains("http:"))
     }

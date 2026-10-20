@@ -39,11 +39,17 @@ public enum MarkdownRenderBridge {
     /// also governs `srcset`, CSS `url()` in style attributes, and the legacy
     /// `background` attribute, so this one directive covers every image load.
     /// `style-src 'unsafe-inline'` stays because Mermaid injects `<style>`.
+    ///
+    /// No `'self'` anywhere: the shell is a `file:` document, and WebKit
+    /// lets `'self'` in a file: document match *any* URL (verified: with
+    /// `img-src 'self'` an https image loads; with `script-src 'self'` an
+    /// https script runs). The `file:` scheme-source is the tight equivalent
+    /// for the bundled scripts and stylesheet.
     public static func contentSecurityPolicy(allowRemoteImages: Bool) -> String {
         let img = allowRemoteImages
-            ? "img-src 'self' data: \(localImageScheme): https:"
-            : "img-src 'self' data: \(localImageScheme):"
-        return "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            ? "img-src data: \(localImageScheme): https:"
+            : "img-src data: \(localImageScheme):"
+        return "default-src 'none'; script-src file:; style-src file: 'unsafe-inline'; "
             + "\(img); base-uri 'none'; form-action 'none'"
     }
 
