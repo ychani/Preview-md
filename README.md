@@ -1,4 +1,4 @@
-# Preview-MD
+# PreviewMD
 
 A lightweight, native macOS Markdown reader and editor. Double-click a `.md` file, drag one onto the Dock icon, or open a folder from the sidebar — then switch between Preview, Split, and Edit views.
 
@@ -23,8 +23,9 @@ Built with SwiftUI + WKWebView. Zero Swift dependencies. Markdown rendered with 
 ## Requirements
 
 - macOS 13 (Ventura) or later
-- Full Xcode (not just Command Line Tools) — `make appex` / `make install-ql` require `xcode-select -p` to point at `/Applications/Xcode.app/Contents/Developer`
 - Swift 5.9+
+- **Command Line Tools** are enough for `swift build`, `swift run PreviewMD`, and a single-architecture app: `make app ARCHS=arm64`
+- **Full Xcode** (`xcode-select -p` → `/Applications/Xcode.app/Contents/Developer`) is needed for `swift test` (XCTest) and for the default universal (arm64 + x86_64) `make app`, which uses Xcode's build system
 
 ## Build & run
 
@@ -34,14 +35,14 @@ git clone https://github.com/ychani/Preview-md.git
 cd Preview-md
 
 # Run in development
-swift run Preview-MD
+swift run PreviewMD
 
 # Release build (executable binary)
 swift build -c release
 
-# Package as Preview-MD.app (contains the Quick Look .appex extension)
-make app
-open dist/Preview-MD.app
+# Package as a universal, ad-hoc-signed PreviewMD.app (contains the Quick Look .appex)
+make app                 # or: make app ARCHS=arm64  (Command Line Tools only)
+open dist/PreviewMD.app
 
 # Install to ~/Applications and register the Quick Look extension
 make install-ql
@@ -49,7 +50,7 @@ make install-ql
 
 ## Quick Look extension
 
-`make app` produces `dist/Preview-MD.app` with `Preview-MD-QL.appex` embedded in `Contents/PlugIns/`. The extension implements `QLPreviewingController` and renders Markdown with the same HTML shell as the main app.
+`make app` produces `dist/PreviewMD.app` with `PreviewMD-QL.appex` embedded in `Contents/PlugIns/`. The extension implements `QLPreviewingController` and renders Markdown with the same HTML shell as the main app.
 
 To register it so Finder's Space-bar preview uses it:
 
@@ -58,15 +59,23 @@ make install-ql     # builds + copies to ~/Applications, then refreshes Quick Lo
 ```
 
 Notes:
-- First launch the app once from `~/Applications/Preview-MD.app` so Launch Services records the bundle, then press Space on any `.md` file in Finder.
+- First launch the app once from `~/Applications/PreviewMD.app` so Launch Services records the bundle, then press Space on any `.md` file in Finder.
 - The extension is registered per-user. On first use macOS may ask you to trust it in **System Settings → Privacy & Security → Extensions → Quick Look**.
 - If previews don't show up, run `qlmanage -r && qlmanage -r cache` and retry.
-- Since this is built with SPM (unsigned), macOS may block the extension under Gatekeeper. Right-click the app and choose Open the first time, or sign it with your own Developer ID for distribution.
+- **Upgrading from Preview-MD:** the app was renamed and its bundle ID changed (`com.preview-md.app` → `com.narnarlabs.previewmd`). `make install-ql` removes an old `~/Applications/Preview-MD.app` automatically (only if its bundle ID matches); if you installed it elsewhere, delete it yourself — otherwise Finder may keep using its Quick Look extension. Old preferences: `defaults delete com.preview-md.app 2>/dev/null || true`.
+
+## Gatekeeper
+
+Release DMGs are signed with a Developer ID and notarized by Apple, so they open normally.
+
+Builds from source (`make app`) are **ad-hoc signed** and not notarized. The first time macOS blocks one, open **System Settings → Privacy & Security**, scroll to the message about PreviewMD, and click **Open Anyway**. (On macOS 15 Sequoia and later, right-click → Open no longer bypasses Gatekeeper.)
+
+Maintainers: `make release` with `SIGN_IDENTITY="Developer ID Application: …"` and a `previewmd` notarytool keychain profile signs, notarizes, and staples both the app and the DMG — see the Distribution section of the `Makefile`.
 
 ## Project layout
 
 ```
-preview-md/
+PreviewMD/
 ├── Package.swift                   # SPM manifest (3 targets)
 ├── Sources/
 │   ├── MdReaderCore/               # shared library: resources + render bridge
@@ -78,7 +87,7 @@ preview-md/
 │   │       ├── purify.min.js       # vendored HTML sanitizer (Apache-2.0 / MPL-2.0)
 │   │       ├── preview.html        # WebView shell + render bridge
 │   │       └── preview.css         # GitHub-style CSS, auto dark mode
-│   ├── MdReader/                   # main app target (product: Preview-MD)
+│   ├── MdReader/                   # main app target (product: PreviewMD)
 │   │   ├── MdReaderApp.swift       # @main, window + commands, onOpenURL
 │   │   ├── ContentView.swift       # HSplitView + toolbar (view-mode picker)
 │   │   ├── SidebarView.swift       # Folder header + file list
@@ -87,18 +96,18 @@ preview-md/
 │   │   ├── AppState.swift          # state + open(url:) / openFile / openPanel
 │   │   ├── MarkdownFile.swift      # Identifiable file model
 │   │   └── ViewMode.swift          # .preview / .split / .edit
-│   └── MdReaderQL/                 # Quick Look .appex (product: Preview-MD-QL)
+│   └── MdReaderQL/                 # Quick Look .appex (product: PreviewMD-QL)
 │       ├── main.swift              # NSExtensionMain entry point
 │       └── PreviewViewController.swift  # QLPreviewingController
 ├── packaging/
-│   ├── Info.plist                  # app bundle plist (+ UTI export for markdown)
+│   ├── Info.plist                  # app bundle plist (+ markdown UTI import)
 │   └── QLInfo.plist                # .appex plist (NSExtension + QL UTIs)
 ├── Makefile                        # `make app` / `make install-ql`
 ├── LICENSE
 └── README.md
 ```
 
-The internal Swift module names (`MdReader`, `MdReaderCore`, `MdReaderQL`) are kept identifier-safe for Swift imports. The user-facing product names are `Preview-MD` and `Preview-MD-QL`.
+The internal Swift module names (`MdReader`, `MdReaderCore`, `MdReaderQL`) are kept identifier-safe for Swift imports. The user-facing product names are `PreviewMD` and `PreviewMD-QL`.
 
 ## Keyboard shortcuts
 
@@ -113,12 +122,19 @@ The internal Swift module names (`MdReader`, `MdReaderCore`, `MdReaderQL`) are k
 
 ## Uninstall
 
-Preview-MD keeps no hidden state beyond standard preferences:
+PreviewMD keeps no hidden state beyond standard preferences:
+
+```bash
+rm -rf ~/Applications/PreviewMD.app
+defaults delete com.narnarlabs.previewmd 2>/dev/null || true
+qlmanage -r && qlmanage -r cache      # refresh Quick Look
+```
+
+If you also have the pre-rename build, remove it too:
 
 ```bash
 rm -rf ~/Applications/Preview-MD.app
-defaults delete PreviewMD 2>/dev/null || true
-qlmanage -r && qlmanage -r cache      # refresh Quick Look
+defaults delete com.preview-md.app 2>/dev/null || true
 ```
 
 ## Contributing
@@ -127,7 +143,7 @@ PRs welcome. To get started:
 
 1. Fork and clone
 2. `swift build` to verify the build works
-3. `swift run Preview-MD` to launch
+3. `swift run PreviewMD` to launch
 4. Make your change, then `swift build && swift test`
 
 CI runs `swift build -c release` and `swift test` on every push/PR. See [CHANGELOG.md](CHANGELOG.md) for release history.
@@ -136,4 +152,4 @@ Style: follow the surrounding code, no new dependencies without discussion, keep
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Bundled JS: [marked](https://github.com/markedjs/marked) (MIT), [DOMPurify](https://github.com/cure53/DOMPurify) (Apache-2.0 OR MPL-2.0), [Mermaid](https://github.com/mermaid-js/mermaid) (MIT).
+MIT — see [LICENSE](LICENSE). Bundled third-party JavaScript ([marked](https://github.com/markedjs/marked), [DOMPurify](https://github.com/cure53/DOMPurify), [Mermaid](https://github.com/mermaid-js/mermaid)) is used under its own licenses — see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
