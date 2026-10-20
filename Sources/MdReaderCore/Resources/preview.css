@@ -9,7 +9,7 @@
   --bg-table-head: #f0ede8;
   --fg:            #1c1917;
   --fg-muted:      #78716c;
-  --fg-faint:      #a8a29e;
+  --fg-faint:      #6f6862;  /* 5.21:1 on --bg, 4.69:1 on --bg-code */
   --border:        #e7e3dc;
   --border-strong: #d6cfc6;
   --link:          #1d4ed8;
@@ -20,6 +20,7 @@
   --mark-bg:       #fef08a;
   --ins-bg:        #dcfce7;
   --del-bg:        #fee2e2;
+  --error-fg:      #b00020;  /* 6.27:1 on --bg-code */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -29,7 +30,7 @@
     --bg-table-head: #211e1b;
     --fg:            #e8e3db;
     --fg-muted:      #a09890;
-    --fg-faint:      #6b6560;
+    --fg-faint:      #8f8881;  /* 5.21:1 on --bg, 4.90:1 on --bg-code */
     --border:        #2e2b27;
     --border-strong: #3d3a35;
     --link:          #93c5fd;
@@ -40,6 +41,7 @@
     --mark-bg:       #713f12;
     --ins-bg:        #14532d;
     --del-bg:        #7f1d1d;
+    --error-fg:      #ff7a7a;  /* 6.79:1 on --bg-code */
   }
 }
 
@@ -355,7 +357,7 @@ details[open] summary { margin-bottom: 0.5em; }
 .mermaid.mermaid-error {
   display: block;
   background: var(--bg-code);
-  color: #b00020;
+  color: var(--error-fg);
   padding: 10px 14px;
   border-radius: 6px;
   border: 1px solid var(--border);
