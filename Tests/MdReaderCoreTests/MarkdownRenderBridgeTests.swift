@@ -52,6 +52,80 @@ final class MarkdownRenderBridgeTests: XCTestCase {
         let evil = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: "x", imageBase: "\");alert(1);//"))
         XCTAssertTrue(evil.hasPrefix(#"setImageBase((["\");alert(1);\/\/"])[0]);"#), evil)
     }
+
+    // MARK: - Wikilinks
+
+    private let wikiRoot = URL(fileURLWithPath: "/vault")
+
+    private func resolution(_ rel: String, _ kind: WikiLinkResolution.Kind) -> WikiLinkResolution {
+        WikiLinkResolution(url: wikiRoot.appendingPathComponent(rel), kind: kind,
+                           rootURL: wikiRoot, relativePath: rel)
+    }
+
+    /// The argument text of `name(...)` inside a guarded call in `js`.
+    private func guardedArgument(_ name: String, in js: String) throws -> String {
+        let open = "(typeof \(name)===\"function\"&&\(name)("
+        let start = try XCTUnwrap(js.range(of: open), "no guarded \(name) call in \(js)")
+        let rest = js[start.upperBound...]
+        let end = try XCTUnwrap(rest.range(of: "));"))
+        return String(rest[..<end.lowerBound])
+    }
+
+    func testRenderWithWikiLinksMap() throws {
+        let links = [
+            "Note": resolution("notes/Note.md", .note),
+            "Note#Sec": resolution("notes/Note.md", .note),
+            "pic.png": resolution("assets/my pic.png", .image),
+            #"we"ird</script>"#: resolution(#"a/"b\.md"#, .note),
+        ]
+        let js = try XCTUnwrap(MarkdownRenderBridge.renderJS(
+            for: "# Hi [[Note]]", imageBase: "previewmd-local://doc-1/",
+            imageRootBase: "previewmd-local://root-1/", wikiLinks: links))
+
+        XCTAssertTrue(js.hasPrefix(##"setImageBase((["previewmd-local:\/\/doc-1\/"])[0]);"##), js)
+        XCTAssertTrue(js.hasSuffix(##"render((["# Hi [[Note]]"])[0])"##), js)
+        // Order: image base, root base, wikilinks, then render.
+        let order = ["setImageBase(", "setImageRootBase(", "setWikiLinks(", "render(("]
+            .compactMap { js.range(of: $0)?.lowerBound }
+        XCTAssertEqual(order.count, 4)
+        XCTAssertEqual(order, order.sorted())
+
+        XCTAssertEqual(try guardedArgument("setImageRootBase", in: js),
+                       ##"(["previewmd-local:\/\/root-1\/"])[0]"##)
+        let json = try guardedArgument("setWikiLinks", in: js)
+        let decoded = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: String]])
+        XCTAssertEqual(decoded, [
+            "Note": ["path": "notes/Note.md", "kind": "note"],
+            "Note#Sec": ["path": "notes/Note.md", "kind": "note"],
+            "pic.png": ["path": "assets/my pic.png", "kind": "image"],
+            #"we"ird</script>"#: ["path": #"a/"b\.md"#, "kind": "note"],
+        ])
+        // Deterministic output (sorted keys).
+        XCTAssertEqual(js, MarkdownRenderBridge.renderJS(
+            for: "# Hi [[Note]]", imageBase: "previewmd-local://doc-1/",
+            imageRootBase: "previewmd-local://root-1/", wikiLinks: links))
+    }
+
+    func testRenderWithNilWikiLinksSendsNull() throws {
+        let js = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: "x", imageBase: nil, wikiLinks: nil))
+        XCTAssertEqual(js, #"setImageBase(null);"#
+            + #"(typeof setImageRootBase==="function"&&setImageRootBase(null));"#
+            + #"(typeof setWikiLinks==="function"&&setWikiLinks(null));"#
+            + #"render((["x"])[0])"#)
+        let empty = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: "x", imageBase: nil, wikiLinks: [:]))
+        XCTAssertTrue(empty.contains("setWikiLinks({})"), empty)
+    }
+
+    func testWikiLinkOverloadKeepsMarkdownIntact() throws {
+        let nasty = "</script>`[[a|b]]` \\ \"q\" \u{2028}"
+        let js = try XCTUnwrap(MarkdownRenderBridge.renderJS(
+            for: nasty, imageBase: nil, wikiLinks: ["a": resolution("a.md", .note)]))
+        let start = try XCTUnwrap(js.range(of: ";render((", options: .backwards))
+        let jsonPart = String(js[start.upperBound...].dropLast(")[0])".count))
+        let decoded = try JSONSerialization.jsonObject(with: Data(jsonPart.utf8)) as? [String]
+        XCTAssertEqual(decoded?.first, nasty)
+    }
 }
 
 final class PreviewContentSecurityPolicyTests: XCTestCase {

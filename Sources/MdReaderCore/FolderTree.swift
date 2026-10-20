@@ -14,12 +14,21 @@ public struct FolderTree: Equatable, Sendable {
     /// True if the scan (or a later refresh) hit `maxFiles`. A full rescan
     /// (`init(scanning:options:)`) is the only thing that clears it.
     public var isTruncated: Bool
+    /// Image assets under the root (canonical URLs, sorted by path) — wikilink
+    /// embed targets. Not part of the tree: never in `root`, `flatFiles`,
+    /// `contains` or `node(at:)`, so the sidebar stays Markdown-only.
+    public private(set) var assetFiles: [URL]
+    /// True if the scan (or a later refresh) hit `maxAssetFiles`.
+    public var isAssetListTruncated: Bool
 
     private var allURLs: Set<URL>
 
-    public init(root: FileNode, isTruncated: Bool = false) {
+    public init(root: FileNode, isTruncated: Bool = false,
+                assetFiles: [URL] = [], isAssetListTruncated: Bool = false) {
         self.root = root
         self.isTruncated = isTruncated
+        self.assetFiles = assetFiles.map(FileNode.canonicalURL).sorted { $0.path < $1.path }
+        self.isAssetListTruncated = isAssetListTruncated
         self.flatFiles = []
         self.allURLs = []
         rebuildIndex()
@@ -28,7 +37,8 @@ public struct FolderTree: Equatable, Sendable {
     /// Scans `url` from disk (synchronous).
     public init(scanning url: URL, options: FolderScanOptions = .default) {
         let result = FolderScanner.scan(url, options: options)
-        self.init(root: result.root, isTruncated: result.truncated)
+        self.init(root: result.root, isTruncated: result.truncated,
+                  assetFiles: result.assetFiles, isAssetListTruncated: result.assetsTruncated)
     }
 
     public var rootURL: URL { root.url }
@@ -92,7 +102,9 @@ public struct FolderTree: Equatable, Sendable {
 
     /// Rescans folder `dir` from disk and splices the result in, keeping the
     /// file cap: the rescan may use whatever `maxFiles` leaves after the
-    /// files outside `dir`. Returns true if the tree changed.
+    /// files outside `dir`. The assets inside `dir` are replaced the same way
+    /// (against `maxAssetFiles`). Returns true if the tree or the asset list
+    /// changed.
     @discardableResult
     public mutating func refresh(directory dir: URL, options: FolderScanOptions = .default) -> Bool {
         guard let components = FileNode.relativeComponents(of: dir, under: root.url) else {
@@ -103,11 +115,18 @@ public struct FolderTree: Equatable, Sendable {
         let filesInside = dirPrefix.map { prefix in flatFiles.lazy.filter { $0.path.hasPrefix(prefix) }.count }
             ?? flatFiles.count
         let budget = options.maxFiles - (flatFiles.count - filesInside)
+        let assetsOutside = dirPrefix.map { prefix in assetFiles.filter { !$0.path.hasPrefix(prefix) } } ?? []
         let result = FolderScanner.rescanReportingTruncation(
-            directory: dirURL, root: root.url, options: options, budget: budget)
+            directory: dirURL, root: root.url, options: options, budget: budget,
+            assetBudget: options.maxAssetFiles - assetsOutside.count)
         let before = self
         replaceChildren(of: dirURL, with: result.children)
         if result.truncated { isTruncated = true }
+        let assets = result.assetFiles.isEmpty
+            ? assetsOutside
+            : (assetsOutside + result.assetFiles).sorted { $0.path < $1.path }
+        if assets != assetFiles { assetFiles = assets }
+        if result.assetsTruncated { isAssetListTruncated = true }
         return self != before
     }
 

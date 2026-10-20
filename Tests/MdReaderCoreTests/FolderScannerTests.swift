@@ -181,6 +181,67 @@ final class FolderScannerTests: XCTestCase {
         XCTAssertEqual(outline(FolderScanner.scan(root).root), ["secret.md"])
     }
 
+    // MARK: - assets
+
+    private func assetPaths(_ urls: [URL]) -> [String] {
+        urls.map { FilePathDisplay.relativePath(of: $0, in: root) }
+    }
+
+    func testImageAssetsCollectedButNotInTree() throws {
+        try touch("note.md")
+        try touch("pic.PNG")
+        try touch("attachments/a.jpg")
+        try touch("attachments/sub/b.svg")
+        try touch("attachments/doc.pdf")
+        try touch("notes/n.md")
+        try touch("notes/c.webp")
+        try touch(".obsidian/icon.png")
+        try touch(".hidden.png")
+        try touch("node_modules/pkg/logo.png")
+        try touch("Bundle.textbundle/assets/d.png")
+
+        let result = FolderScanner.scan(root)
+        XCTAssertEqual(assetPaths(result.assetFiles), [
+            "attachments/a.jpg", "attachments/sub/b.svg", "notes/c.webp", "pic.PNG",
+        ])
+        XCTAssertFalse(result.assetsTruncated)
+        XCTAssertEqual(result.assetFiles.first,
+                       FileNode.canonicalURL(root.appendingPathComponent("attachments/a.jpg")))
+        // Image-only folders are still pruned from the sidebar tree.
+        XCTAssertEqual(outline(result.root), ["notes/", "notes/n.md", "note.md"])
+        let tree = FolderTree(scanning: root)
+        XCTAssertEqual(tree.flatFiles.map(\.lastPathComponent), ["n.md", "note.md"])
+        XCTAssertEqual(tree.assetFiles, result.assetFiles)
+        XCTAssertFalse(tree.contains(root.appendingPathComponent("pic.PNG")))
+        XCTAssertNil(tree.node(at: root.appendingPathComponent("attachments")))
+    }
+
+    func testAssetCapAndOptOut() throws {
+        for i in 1...5 { try touch("img/\(i).png") }
+        try touch("a.md")
+        var options = FolderScanOptions()
+        options.maxAssetFiles = 3
+        let capped = FolderScanner.scan(root, options: options)
+        XCTAssertEqual(capped.assetFiles.count, 3)
+        XCTAssertTrue(capped.assetsTruncated)
+        XCTAssertFalse(capped.truncated, "the Markdown cap is separate")
+
+        options.assetExtensions = []
+        let none = FolderScanner.scan(root, options: options)
+        XCTAssertEqual(none.assetFiles, [])
+        XCTAssertFalse(none.assetsTruncated)
+    }
+
+    func testAssetsHonorMaxDepth() throws {
+        try touch("top.png")
+        try touch("l1/a.png")
+        try touch("l1/l2/b.png")
+        var options = FolderScanOptions()
+        options.maxDepth = 2
+        XCTAssertEqual(assetPaths(FolderScanner.scan(root, options: options).assetFiles),
+                       ["l1/a.png", "top.png"])
+    }
+
     // MARK: - rescan
 
     func testRescanRebuildsSubtreeIncludingNewSubfolders() throws {

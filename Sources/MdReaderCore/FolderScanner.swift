@@ -17,6 +17,20 @@ public struct FolderScanOptions: Equatable, Sendable {
     public var maxDepth: Int
     /// Most Markdown files a scan collects before stopping (`truncated`).
     public var maxFiles: Int
+    /// Lowercased extensions of asset files (images) collected alongside the
+    /// Markdown files — for wikilink embeds — into `ScanResult.assetFiles`.
+    /// Assets never appear in the tree and never keep a folder from being
+    /// pruned. Empty disables asset collection.
+    public var assetExtensions: Set<String>
+    /// Most asset files a scan collects (`assetsTruncated`). Independent of
+    /// `maxFiles`.
+    public var maxAssetFiles: Int
+
+    /// Image types collected as assets by default.
+    public static let defaultAssetExtensions: Set<String> = [
+        "png", "apng", "jpg", "jpeg", "gif", "webp", "svg", "heic", "heif", "avif",
+        "bmp", "tif", "tiff",
+    ]
 
     public init(
         extensions: Set<String> = MarkdownDocumentIO.markdownExtensions,
@@ -24,7 +38,9 @@ public struct FolderScanOptions: Equatable, Sendable {
         skipHidden: Bool = true,
         followSymlinkedDirectories: Bool = false,
         maxDepth: Int = 16,
-        maxFiles: Int = 20_000
+        maxFiles: Int = 20_000,
+        assetExtensions: Set<String> = FolderScanOptions.defaultAssetExtensions,
+        maxAssetFiles: Int = 20_000
     ) {
         self.extensions = Set(extensions.map { $0.lowercased() })
         self.ignoredDirectoryNames = ignoredDirectoryNames
@@ -32,6 +48,8 @@ public struct FolderScanOptions: Equatable, Sendable {
         self.followSymlinkedDirectories = followSymlinkedDirectories
         self.maxDepth = maxDepth
         self.maxFiles = maxFiles
+        self.assetExtensions = Set(assetExtensions.map { $0.lowercased() })
+        self.maxAssetFiles = maxAssetFiles
     }
 
     public static let `default` = FolderScanOptions()
@@ -39,11 +57,21 @@ public struct FolderScanOptions: Equatable, Sendable {
     func isMarkdownName(_ name: String) -> Bool {
         extensions.contains((name as NSString).pathExtension.lowercased())
     }
+
+    func isAssetName(_ name: String) -> Bool {
+        !assetExtensions.isEmpty
+            && assetExtensions.contains((name as NSString).pathExtension.lowercased())
+    }
 }
 
 /// Builds the folder explorer's tree from disk. Reads directory metadata only
 /// — never file contents — so iCloud-evicted files are listed without being
 /// downloaded. Folders with no Markdown descendants are pruned.
+///
+/// Image assets (`FolderScanOptions.assetExtensions`) under the same skip
+/// rules are listed separately in `ScanResult.assetFiles`, sorted by path;
+/// they are not tree nodes. Once the Markdown cap is hit the walk stops, so
+/// assets past that point are not collected either.
 ///
 /// Synchronous; run it off the main thread for large folders.
 public enum FolderScanner {
@@ -52,10 +80,17 @@ public enum FolderScanner {
         public let root: FileNode
         /// True if `maxFiles` was reached and some files were left out.
         public let truncated: Bool
+        /// Image assets found during the scan (canonical URLs, sorted by path).
+        public let assetFiles: [URL]
+        /// True if `maxAssetFiles` was reached and some assets were left out.
+        public let assetsTruncated: Bool
 
-        public init(root: FileNode, truncated: Bool) {
+        public init(root: FileNode, truncated: Bool,
+                    assetFiles: [URL] = [], assetsTruncated: Bool = false) {
             self.root = root
             self.truncated = truncated
+            self.assetFiles = assetFiles
+            self.assetsTruncated = assetsTruncated
         }
     }
 
@@ -69,7 +104,9 @@ public enum FolderScanner {
         let children = walker.children(of: rootURL, level: 0)
         return ScanResult(
             root: FileNode(canonicalURL: rootURL, kind: .folder, sortedChildren: children),
-            truncated: walker.truncated)
+            truncated: walker.truncated,
+            assetFiles: walker.sortedAssets(),
+            assetsTruncated: walker.assetsTruncated)
     }
 
     /// Rebuilds the (pruned, sorted) children of `directory`, a folder inside
@@ -85,17 +122,27 @@ public enum FolderScanner {
                                   budget: budget).children
     }
 
+    struct RescanResult {
+        var children: [FileNode]
+        var truncated: Bool
+        /// Assets inside `directory`, sorted by path.
+        var assetFiles: [URL] = []
+        var assetsTruncated = false
+    }
+
     static func rescanReportingTruncation(
-        directory: URL, root: URL, options: FolderScanOptions, budget: Int?
-    ) -> (children: [FileNode], truncated: Bool) {
+        directory: URL, root: URL, options: FolderScanOptions, budget: Int?,
+        assetBudget: Int? = nil
+    ) -> RescanResult {
         let rootURL = FileNode.canonicalURL(root)
         guard let components = FileNode.relativeComponents(of: directory, under: rootURL),
               components.count < max(options.maxDepth, 1) else {
-            return ([], false)
+            return RescanResult(children: [], truncated: false)
         }
         // Rebuild the directory URL from the root so it matches tree URLs.
         let dirURL = components.reduce(rootURL) { $0.appendingNodeComponent($1) }
-        let walker = Walker(options: options, budget: max(budget ?? options.maxFiles, 0))
+        let walker = Walker(options: options, budget: max(budget ?? options.maxFiles, 0),
+                            assetBudget: max(assetBudget ?? options.maxAssetFiles, 0))
 
         // Every folder from the root down to `directory` must be one the full
         // scan would have descended into.
@@ -104,12 +151,14 @@ public enum FolderScanner {
         for name in components {
             current = current.appendingNodeComponent(name)
             guard let entry = Walker.entry(for: current), walker.shouldDescend(entry) else {
-                return ([], false)
+                return RescanResult(children: [], truncated: false)
             }
             walker.enter(current)
         }
         let children = walker.children(of: dirURL, level: components.count)
-        return (children, walker.truncated)
+        return RescanResult(children: children, truncated: walker.truncated,
+                            assetFiles: walker.sortedAssets(),
+                            assetsTruncated: walker.assetsTruncated)
     }
 
     // MARK: - Walker
@@ -120,6 +169,9 @@ public enum FolderScanner {
         let options: FolderScanOptions
         var budget: Int
         var truncated = false
+        var assetBudget: Int
+        var assetsTruncated = false
+        private(set) var assets: [URL] = []
         private var activeRealPaths: Set<String> = []
 
         static let resourceKeys: [URLResourceKey] = [
@@ -135,9 +187,14 @@ public enum FolderScanner {
             let isHidden: Bool
         }
 
-        init(options: FolderScanOptions, budget: Int) {
+        init(options: FolderScanOptions, budget: Int, assetBudget: Int? = nil) {
             self.options = options
             self.budget = budget
+            self.assetBudget = assetBudget ?? options.maxAssetFiles
+        }
+
+        func sortedAssets() -> [URL] {
+            assets.sorted { $0.path < $1.path }
         }
 
         func enter(_ url: URL) {
@@ -214,6 +271,14 @@ public enum FolderScanner {
                 } else if options.isMarkdownName(name) {
                     if options.skipHidden && entry.isHidden { continue }
                     candidates.append(FileNode(canonicalURL: childURL, kind: .file, sortedChildren: nil))
+                } else if options.isAssetName(name) {
+                    if options.skipHidden && entry.isHidden { continue }
+                    if assetBudget > 0 {
+                        assetBudget -= 1
+                        assets.append(childURL)
+                    } else {
+                        assetsTruncated = true
+                    }
                 }
             }
             candidates.sort(by: FileNode.areInIncreasingOrder)
