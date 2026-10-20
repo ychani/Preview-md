@@ -59,6 +59,34 @@ public enum MarkdownRenderBridge {
             of: strict, with: contentSecurityPolicy(allowRemoteImages: true))
     }
 
+    // MARK: - Links
+
+    /// Resolves a relative link from the previewed document (`other.md`,
+    /// `../docs/guide.markdown#setup`, `sub%20dir/x.md`) to an existing
+    /// Markdown file, or nil. Links with a scheme, network-path links
+    /// (`//host`), non-Markdown targets and missing files are refused.
+    public static func resolveMarkdownLink(_ href: String, documentURL: URL) -> URL? {
+        let trimmed = href.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("//"), !trimmed.hasPrefix("#") else { return nil }
+        let components = URLComponents(string: trimmed)
+            ?? trimmed.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed)
+                .flatMap { URLComponents(string: $0) }
+        guard let components, components.scheme == nil, components.host == nil else { return nil }
+        let encodedPath = components.percentEncodedPath
+        guard !encodedPath.isEmpty else { return nil }
+        let folder = documentURL.deletingLastPathComponent()
+        guard let target = URL(string: encodedPath, relativeTo: folder)?
+                .absoluteURL.standardizedFileURL,
+              target.isFileURL,
+              markdownExtensions.contains(target.pathExtension.lowercased()) else { return nil }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir),
+              !isDir.boolValue else { return nil }
+        return target
+    }
+
+    static let markdownExtensions: Set<String> = ["md", "markdown"]
+
     // MARK: - Local images
 
     /// URL scheme the preview uses for images next to the document.

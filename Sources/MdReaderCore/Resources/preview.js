@@ -224,6 +224,82 @@ function runMermaid() {
   });
 }
 
+// ── Heading ids (GitHub-style slugs) ──────────────────────────
+// Same algorithm as github-slugger, so [x](#some-heading) links written for
+// GitHub work here: lowercase, drop everything but letters, marks, numbers,
+// connector punctuation (_), spaces and hyphens, then spaces -> '-'.
+// Duplicates get -1, -2, ... Headings that already carry an id (raw HTML)
+// keep it. The TOC uses these ids too.
+var SLUG_STRIP = /[^\p{L}\p{M}\p{N}\p{Pc} -]/gu;
+function slugify(text) {
+  return String(text).toLowerCase().replace(SLUG_STRIP, '').replace(/ /g, '-');
+}
+
+function assignHeadingIds() {
+  var occurrences = Object.create(null);
+  // Reserve the shell's own id so no heading can duplicate it.
+  occurrences[contentEl.id] = 0;
+  var headings = contentEl.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  for (var i = 0; i < headings.length; i++) {
+    var h = headings[i];
+    if (h.id) {
+      if (!(h.id in occurrences)) occurrences[h.id] = 0;
+      continue;
+    }
+    var original = slugify(h.textContent || '') || 'section';
+    var slug = original;
+    while (slug in occurrences) {
+      occurrences[original] = (occurrences[original] || 0) + 1;
+      slug = original + '-' + occurrences[original];
+    }
+    occurrences[slug] = 0;
+    h.id = slug;
+  }
+}
+
+// ── Links ─────────────────────────────────────────────────────
+function scrollToFragment(fragment) {
+  var id;
+  try { id = decodeURIComponent(fragment); } catch (e) { id = fragment; }
+  if (!id) { window.scrollTo(0, 0); return; }
+  var target = document.getElementById(id);
+  if (!target || !contentEl.contains(target)) {
+    var named = document.getElementsByName(id);
+    target = named.length ? named[0] : null;
+  }
+  if (target && contentEl.contains(target)) {
+    target.scrollIntoView({ block: 'start' });
+  }
+}
+
+var URL_SCHEME = /^[a-z][a-z0-9+.\-]*:/i;
+var MARKDOWN_PATH = /\.(md|markdown)$/i;
+
+// In-document and relative links are handled here; anything with a scheme
+// (https:, mailto:, ...) is left to the app's navigation policy.
+document.addEventListener('click', function (ev) {
+  if (ev.defaultPrevented || ev.button !== 0) return;
+  var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
+  if (!a || !contentEl.contains(a)) return;
+  var href = (a.getAttribute('href') || '').trim();
+  if (href.charAt(0) === '#') {
+    ev.preventDefault();
+    scrollToFragment(href.slice(1));
+    return;
+  }
+  if (URL_SCHEME.test(href)) return;
+  // Relative (or absolute-path) link: never navigate the shell away.
+  ev.preventDefault();
+  if (href.indexOf('//') === 0) return;
+  var path = href.split('#')[0].split('?')[0];
+  var decoded;
+  try { decoded = decodeURIComponent(path); } catch (e) { decoded = path; }
+  if (MARKDOWN_PATH.test(decoded)) {
+    post('openLocalFile', href);
+  }
+  // Other local files (PDFs, source files, ...) stay inert.
+}, true);
+
 // ── TOC ───────────────────────────────────────────────────────
 function extractTOC() {
   var nodes = contentEl.querySelectorAll('h1, h2, h3');
@@ -271,6 +347,7 @@ function render(md) {
   contentEl.innerHTML = html;
   updateRemoteBanner(remoteRefCount > 0);
 
+  assignHeadingIds();
   transformMermaidBlocks();
   runMermaid();
   extractTOC();

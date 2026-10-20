@@ -105,6 +105,52 @@ final class PreviewContentSecurityPolicyTests: XCTestCase {
     }
 }
 
+final class MarkdownLinkResolutionTests: XCTestCase {
+    private var root: URL!
+    private var doc: URL!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("previewmd-links-\(UUID().uuidString)", isDirectory: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: root.appendingPathComponent("docs/sub dir"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root.appendingPathComponent("docs/folder.md"), withIntermediateDirectories: true)
+        doc = root.appendingPathComponent("docs/readme.md")
+        for path in ["docs/readme.md", "docs/other.md", "docs/sub dir/guide.markdown", "top.md", "docs/notes.txt"] {
+            try Data("# x".utf8).write(to: root.appendingPathComponent(path))
+        }
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func resolve(_ href: String) -> String? {
+        MarkdownRenderBridge.resolveMarkdownLink(href, documentURL: doc)?
+            .path.replacingOccurrences(of: root.standardizedFileURL.path + "/", with: "")
+    }
+
+    func testResolvesRelativeMarkdownLinks() {
+        XCTAssertEqual(resolve("other.md"), "docs/other.md")
+        XCTAssertEqual(resolve("./other.md#section"), "docs/other.md")
+        XCTAssertEqual(resolve("other.md?x=1"), "docs/other.md")
+        XCTAssertEqual(resolve("sub%20dir/guide.markdown"), "docs/sub dir/guide.markdown")
+        XCTAssertEqual(resolve("sub dir/guide.markdown"), "docs/sub dir/guide.markdown")
+        XCTAssertEqual(resolve("../top.md"), "top.md")
+    }
+
+    func testRefusesEverythingElse() {
+        XCTAssertNil(resolve("notes.txt"))
+        XCTAssertNil(resolve("missing.md"))
+        XCTAssertNil(resolve("folder.md"))
+        XCTAssertNil(resolve("#heading"))
+        XCTAssertNil(resolve(""))
+        XCTAssertNil(resolve("https://example.com/x.md"))
+        XCTAssertNil(resolve("file:///etc/x.md"))
+        XCTAssertNil(resolve("//host/x.md"))
+    }
+}
+
 final class LocalImageResolutionTests: XCTestCase {
     private var root: URL!
     private var docs: URL!

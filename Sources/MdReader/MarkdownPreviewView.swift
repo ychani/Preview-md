@@ -12,6 +12,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
     /// The file being previewed. Scopes the remote-images opt-in (which
     /// resets when this changes).
     var documentURL: URL?
+    /// Opens another local Markdown file the document links to (relative
+    /// `[x](other.md)`). Nil falls back to asking Launch Services to open the
+    /// file with this app.
+    var onOpenLocalFile: ((URL) -> Void)?
 
     init(
         markdownText: String,
@@ -19,7 +23,8 @@ struct MarkdownPreviewView: NSViewRepresentable {
         onTOCUpdate: (([TOCEntry]) -> Void)? = nil,
         scrollRequest: ScrollRequest? = nil,
         onWebViewReady: ((WKWebView?) -> Void)? = nil,
-        documentURL: URL? = nil
+        documentURL: URL? = nil,
+        onOpenLocalFile: ((URL) -> Void)? = nil
     ) {
         self.markdownText = markdownText
         self.onRenderComplete = onRenderComplete
@@ -27,9 +32,10 @@ struct MarkdownPreviewView: NSViewRepresentable {
         self.scrollRequest = scrollRequest
         self.onWebViewReady = onWebViewReady
         self.documentURL = documentURL
+        self.onOpenLocalFile = onOpenLocalFile
     }
 
-    private static let messageNames = ["tocUpdate", "loadRemoteImages"]
+    private static let messageNames = ["tocUpdate", "loadRemoteImages", "openLocalFile"]
 
     func makeNSView(context: Context) -> WKWebView {
         let coordinator = context.coordinator
@@ -58,6 +64,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         coordinator.onRenderComplete = onRenderComplete
         coordinator.onTOCUpdate = onTOCUpdate
         coordinator.onWebViewReady = onWebViewReady
+        coordinator.onOpenLocalFile = onOpenLocalFile
         coordinator.setDocument(documentURL)
         coordinator.loadShell()
         onWebViewReady?(webView)
@@ -69,6 +76,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         coordinator.onRenderComplete = onRenderComplete
         coordinator.onTOCUpdate = onTOCUpdate
         coordinator.onWebViewReady = onWebViewReady
+        coordinator.onOpenLocalFile = onOpenLocalFile
         coordinator.setDocument(documentURL)
         coordinator.revalidateRemoteOptIn(markdown: markdownText)
         coordinator.scheduleRender(markdownText)
@@ -90,6 +98,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         var onRenderComplete: (() -> Void)?
         var onTOCUpdate: (([TOCEntry]) -> Void)?
         var onWebViewReady: ((WKWebView?) -> Void)?
+        var onOpenLocalFile: ((URL) -> Void)?
         let imageHandler = LocalImageSchemeHandler()
         /// What was last sent to `render()`: the text and the image base it
         /// was rendered with (a different folder must re-render).
@@ -221,9 +230,17 @@ struct MarkdownPreviewView: NSViewRepresentable {
         ) {
             let url = navigationAction.request.url
             if navigationAction.navigationType == .linkActivated, let url {
+                // preview.js handles #fragment and relative links itself; this
+                // is the backstop. Same-document fragment jumps may proceed.
+                if Self.isSameDocumentFragment(url, current: webView.url) {
+                    decisionHandler(.allow)
+                    return
+                }
                 if url.scheme == "http" || url.scheme == "https" || url.scheme == "mailto" {
                     NSWorkspace.shared.open(url)
                 }
+                // Everything else (file: links to non-Markdown files, other
+                // schemes) is cancelled.
                 decisionHandler(.cancel)
                 return
             }
@@ -243,6 +260,12 @@ struct MarkdownPreviewView: NSViewRepresentable {
             switch message.name {
             case "tocUpdate":
                 onTOCUpdate?(Self.parseTOC(message.body))
+            case "openLocalFile":
+                guard let href = message.body as? String,
+                      let documentURL,
+                      let target = MarkdownRenderBridge.resolveMarkdownLink(
+                        href, documentURL: documentURL) else { return }
+                openLocalFile(target)
             case "loadRemoteImages":
                 guard !remoteImagesAllowed else { return }
                 remoteOptIn = currentScope(for: pendingMarkdown)
@@ -250,6 +273,32 @@ struct MarkdownPreviewView: NSViewRepresentable {
             default:
                 break
             }
+        }
+
+        private func openLocalFile(_ url: URL) {
+            if let onOpenLocalFile {
+                onOpenLocalFile(url)
+                return
+            }
+            // No host callback: hand the file to Launch Services, aimed at
+            // this app when running as a bundle.
+            let app = Bundle.main.bundleURL
+            if app.pathExtension == "app" {
+                NSWorkspace.shared.open(
+                    [url], withApplicationAt: app,
+                    configuration: NSWorkspace.OpenConfiguration(),
+                    completionHandler: nil)
+            }
+        }
+
+        private static func isSameDocumentFragment(_ url: URL, current: URL?) -> Bool {
+            guard url.fragment != nil, let current,
+                  var target = URLComponents(url: url, resolvingAgainstBaseURL: true),
+                  var here = URLComponents(url: current, resolvingAgainstBaseURL: true)
+            else { return false }
+            target.fragment = nil
+            here.fragment = nil
+            return target == here
         }
 
         private static func parseTOC(_ body: Any) -> [TOCEntry] {
