@@ -97,7 +97,7 @@ defaults delete com.preview-md.app 2>/dev/null || true
 
 - **Preview, Split, and Edit views** (⌘1 / ⌘2 / ⌘3) with GitHub-style rendering that follows light and dark mode.
 - **Auto-reload** follows changes made in another app and asks first if you have unsaved edits.
-- **Read Aloud** (⇧⌘R) highlights each word and sentence as [Univocal](https://univocalapp.com) reads the preview to you, and scrolls along. Click a word to jump there; ⇧⌘. stops.
+- **Read Aloud** (⇧⌘R) highlights each word and sentence as [Univocal](https://univocalapp.com) reads the preview to you, and scrolls along. Click a word to jump there; ⇧⌘. stops. Needs a Univocal release with Connect support (coming soon).
 - **Encoding-aware saving** keeps a file's original encoding (UTF-8, UTF-16, Latin-1/CP-1252, or Shift-JIS), byte-order mark, and line endings.
 
 ### Explorer & workspace
