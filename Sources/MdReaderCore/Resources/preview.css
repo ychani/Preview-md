@@ -237,10 +237,10 @@ pre code {
   color: var(--fg);
 }
 
-/* Language label */
-pre[class*="language-"]::before,
-pre code[class*="language-"]::before {
-  content: attr(class);
+/* Language label: data-lang is set by markdown-extensions.js (just the name,
+   e.g. "mermaid"); unlabeled fences have no attribute and so no label. */
+pre[data-lang]::before {
+  content: attr(data-lang);
   display: block;
   font-size: 0.7em;
   font-family: -apple-system, sans-serif;

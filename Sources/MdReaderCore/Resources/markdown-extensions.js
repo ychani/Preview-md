@@ -310,10 +310,27 @@ var PreviewMDExtensions = (function () {
     };
   }
 
+  // Fenced code blocks: copy the language onto the <pre> as data-lang so
+  // preview.css labels the block with just the name ("mermaid", not
+  // "language-mermaid"). marked has already escaped the language for the
+  // class attribute and the capture stops at the closing quote, so it is
+  // re-emitted as-is. <code class="language-…"> is left untouched (the app's
+  // Mermaid pass selects on it). Unlabeled fences get no attribute.
+  var CODE_BLOCK_OPEN = /<pre><code class="language-([^"\s]+)">/g;
+
+  function labelCodeBlocks(html) {
+    return html.replace(CODE_BLOCK_OPEN, function (_, lang) {
+      return '<pre data-lang="' + lang + '"><code class="language-' + lang + '">';
+    });
+  }
+
   function install(marked, options) {
     options = options || {};
     if (!marked || typeof marked.use !== 'function') return false;
-    marked.use({ extensions: [frontMatterExtension(), wikilinkExtension(options)] });
+    marked.use({
+      extensions: [frontMatterExtension(), wikilinkExtension(options)],
+      hooks: { postprocess: labelCodeBlocks }
+    });
     return true;
   }
 
@@ -321,6 +338,7 @@ var PreviewMDExtensions = (function () {
     install: install,
     // Exposed for tests.
     _parseFrontMatter: parseFrontMatter,
-    _parseWikiLink: parseWikiLink
+    _parseWikiLink: parseWikiLink,
+    _labelCodeBlocks: labelCodeBlocks
   };
 })();
