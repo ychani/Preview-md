@@ -27,7 +27,7 @@ public struct UnivocalError: Error, Sendable, Equatable {
     public var reason: String?
     public var sessionId: String?
 
-    public init(code: Code, message: String, fatal: Bool = false, reason: String? = nil, sessionId: String? = nil) {
+    public init(code: Code, message: String = "", fatal: Bool = false, reason: String? = nil, sessionId: String? = nil) {
         self.code = code
         self.message = message
         self.fatal = fatal
