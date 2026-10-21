@@ -132,6 +132,12 @@ struct MdReaderApp: App {
                 }
                 .keyboardShortcut("f", modifiers: .command)
                 .disabled(appState.selectedFile == nil)
+
+                // ⇧⌘R / ⇧⌘. (⌥⌘R is Reveal in Finder).
+                Menu("Read Aloud") {
+                    ReadAloudCommands(readAloud: appState.readAloud,
+                                      isDocumentReady: appState.canReadAloud)
+                }
             }
             CommandGroup(after: .toolbar) {
                 Button("Preview") { appState.viewMode = .preview }

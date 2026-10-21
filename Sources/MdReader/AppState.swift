@@ -42,8 +42,26 @@ struct RootState: Identifiable, Equatable {
 @MainActor
 final class AppState: ObservableObject {
     @Published var files: [MarkdownFile] = []
-    @Published var selectedFile: MarkdownFile?
-    @Published var viewMode: ViewMode = .preview
+    @Published var selectedFile: MarkdownFile? {
+        didSet {
+            if oldValue?.url != selectedFile?.url { readAloud.documentDidChange() }
+        }
+    }
+    @Published var viewMode: ViewMode = .preview {
+        didSet {
+            // No preview to highlight: stop rather than read on invisibly.
+            if viewMode == .edit { readAloud.stop() }
+        }
+    }
+
+    /// Read Aloud via Univocal (toolbar, Edit ▸ Read Aloud).
+    let readAloud = ReadAloudController()
+
+    /// A document is on screen in Preview or Split view (Read Aloud reads
+    /// the preview).
+    var canReadAloud: Bool {
+        selectedFile != nil && viewMode != .edit && loadErrorMessage == nil
+    }
 
     /// Which population `files` represents. Drives sidebar header + context menu.
     @Published var sidebarMode: SidebarMode = .openedFiles
@@ -192,6 +210,7 @@ final class AppState: ObservableObject {
     private var launchObserver: NSObjectProtocol?
 
     init() {
+        readAloud.documentTitle = { [weak self] in self?.selectedFile?.name }
         loadRecents()
         Self.migrateLegacyBookmark()
         scheduleWorkspaceRestore()
