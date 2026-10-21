@@ -456,7 +456,13 @@ span.wikilink { color: var(--link); }
 }
 
 /* ── Remote-images banner ───────────────────────────────────── */
+/* Sticky: re-rendering the same document keeps its scroll offset, so a
+   remote image added while scrolled down (Split view) would otherwise raise
+   a banner nobody sees. */
 .previewmd-remote-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -471,6 +477,8 @@ span.wikilink { color: var(--link); }
   line-height: 1.4;
 }
 .previewmd-remote-banner[hidden] { display: none; }
+/* Keep heading jumps (scrollIntoView, #fragments) clear of the banner. */
+html:has(> body > .previewmd-remote-banner:not([hidden])) { scroll-padding-top: 48px; }
 .previewmd-remote-banner button {
   font: inherit;
   color: var(--fg);

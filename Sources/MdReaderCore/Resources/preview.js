@@ -104,11 +104,23 @@ var remoteImagesAllowed = (function () {
   return /img-src[^;]*\shttps:/.test(csp);
 })();
 
-// Attributes whose URLs CSP img-src governs (src, srcset, poster, the legacy
-// background attribute, and url() inside style).
-var IMAGE_URL_ATTRS = ['src', 'srcset', 'poster', 'background', 'style'];
-var REMOTE_URL = /(^|[\s,('"])https?:\/\//i;
-var remoteRefCount = 0;
+// Counted over the final, sanitized DOM after every render (see
+// remoteImageRefCount in markdown-extensions.js), independent of whether the
+// CSP then blocks the loads. Element.prototype.getAttribute is captured at
+// load time so rendered content cannot clobber it.
+var getAttributeOf = Element.prototype.getAttribute;
+function countRemoteImages(root) {
+  if (!root || !extensionsAPI || typeof extensionsAPI.remoteImageRefCount !== 'function') return 0;
+  var els = root.getElementsByTagName('*');
+  var count = 0;
+  for (var i = 0; i < els.length; i++) {
+    var el = els[i];
+    count += extensionsAPI.remoteImageRefCount(el.localName, function (name) {
+      return getAttributeOf.call(el, name);
+    });
+  }
+  return count;
+}
 
 // ── Local images ──────────────────────────────────────────────
 // Relative <img src> is rewritten to the app's previewmd-local: scheme,
@@ -177,10 +189,6 @@ if (purifyAPI && typeof purifyAPI.addHook === 'function') {
   purifyAPI.addHook('afterSanitizeAttributes', function (node) {
     if (!node.getAttribute) return;
     rewriteLocalImage(node);
-    for (var i = 0; i < IMAGE_URL_ATTRS.length; i++) {
-      var v = node.getAttribute(IMAGE_URL_ATTRS[i]);
-      if (v && REMOTE_URL.test(v)) { remoteRefCount++; break; }
-    }
   });
 }
 
@@ -203,7 +211,8 @@ function updateRemoteBanner(hasRemote) {
     button.textContent = 'Load remote images';
     button.addEventListener('click', function () {
       button.disabled = true;
-      post('loadRemoteImages', true);
+      // The opt-in reloads the shell; the app restores this offset.
+      post('loadRemoteImages', { scrollY: window.scrollY || 0 });
     });
     remoteBanner.appendChild(label);
     remoteBanner.appendChild(button);
@@ -438,7 +447,11 @@ function extractTOC() {
 }
 
 // ── Render ────────────────────────────────────────────────────
-function render(md) {
+// options (from Swift, see MarkdownRenderBridge.renderJS(…, scroll:)):
+//   none                keep the current scroll offset (same document)
+//   { resetScroll: true } start at the top (a different document)
+//   { scrollY: <n> }    scroll to n (same document in a freshly loaded shell)
+function render(md, options) {
   if (!contentEl) return;
   var scrollY = window.scrollY;
   renderGeneration++;
@@ -449,7 +462,6 @@ function render(md) {
   } catch (e) {
     html = '<pre>' + String(e) + '</pre>';
   }
-  remoteRefCount = 0;
   if (purifyAPI) {
     html = purifyAPI.sanitize(html, {
       ADD_ATTR: ['target'],
@@ -464,13 +476,19 @@ function render(md) {
     html = '<pre>' + esc.innerHTML + '</pre>';
   }
   contentEl.innerHTML = html;
-  updateRemoteBanner(remoteRefCount > 0);
+  updateRemoteBanner(countRemoteImages(contentEl) > 0);
 
   assignHeadingIds();
   transformMermaidBlocks();
   runMermaid();
   extractTOC();
 
+  if (options && options.resetScroll === true) {
+    scrollY = 0;
+  } else if (options && typeof options.scrollY === 'number' &&
+             isFinite(options.scrollY) && options.scrollY >= 0) {
+    scrollY = options.scrollY;
+  }
   window.scrollTo(0, scrollY);
 }
 
