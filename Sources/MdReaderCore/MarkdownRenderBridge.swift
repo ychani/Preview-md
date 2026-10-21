@@ -193,10 +193,9 @@ public enum MarkdownRenderBridge {
     /// Maps a `previewmd-local:` request to a file on disk, or nil if it must
     /// be refused. A request is served only if:
     /// - its path has no `.`/`..` segments (after percent-decoding),
-    /// - the file, with symlinks resolved, is inside `documentFolder` (also
-    ///   resolved) — so neither `..` nor a symlink can escape the folder,
-    /// - both the requested name and the resolved file have an image extension,
-    /// - it is an existing regular file.
+    /// - it passes `resolveImageFile` (inside `documentFolder` with symlinks
+    ///   resolved, image extension, regular file),
+    /// - it is at most `maxLocalImageBytes`.
     public static func resolveLocalImage(
         _ url: URL, documentFolder: URL
     ) -> (fileURL: URL, mimeType: String)? {
@@ -206,10 +205,32 @@ public enum MarkdownRenderBridge {
         let segments = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard !segments.isEmpty,
               !segments.contains(where: { $0 == "." || $0 == ".." }) else { return nil }
+        guard let file = resolveImageFile(segments: segments, inside: documentFolder),
+              let mime = localImageMIMETypes[file.ext] else { return nil }
+        if file.size > maxLocalImageBytes { return nil }
+        return (URL(fileURLWithPath: file.path), mime)
+    }
+
+    /// The path policy shared by the app's `previewmd-local:` scheme and
+    /// Quick Look's `LocalImageInliner`. `segments` are already
+    /// percent-decoded, non-empty path components relative to `folder`;
+    /// callers decide which `.`/`..` segments they accept (both currently
+    /// refuse them). Returns the file only if:
+    /// - with symlinks resolved, it is inside `folder` (also resolved), so a
+    ///   symlink can't escape the folder,
+    /// - both the requested name and the resolved file have an image
+    ///   extension (`localImageMIMETypes`),
+    /// - it is an existing regular file.
+    /// `ext` is the resolved file's lowercase extension; `size` is in bytes.
+    static func resolveImageFile(
+        segments: [String], inside folder: URL
+    ) -> (path: String, ext: String, size: Int)? {
+        guard !segments.isEmpty,
+              !segments.contains(where: { $0.isEmpty || $0.contains("\0") }) else { return nil }
         guard let requestedExt = segments.last.map({ ($0 as NSString).pathExtension.lowercased() }),
               localImageMIMETypes[requestedExt] != nil else { return nil }
 
-        guard let root = canonicalPath(documentFolder.path) else { return nil }
+        guard let root = canonicalPath(folder.path) else { return nil }
         let candidate = segments.reduce(URL(fileURLWithPath: root, isDirectory: true)) {
             $0.appendingPathComponent($1)
         }
@@ -218,11 +239,11 @@ public enum MarkdownRenderBridge {
         guard resolved.hasPrefix(rootPrefix) else { return nil }
 
         let resolvedExt = (resolved as NSString).pathExtension.lowercased()
-        guard let mime = localImageMIMETypes[resolvedExt] else { return nil }
+        guard localImageMIMETypes[resolvedExt] != nil else { return nil }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: resolved),
               attrs[.type] as? FileAttributeType == .typeRegular else { return nil }
-        if let size = attrs[.size] as? NSNumber, size.intValue > maxLocalImageBytes { return nil }
-        return (URL(fileURLWithPath: resolved), mime)
+        let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+        return (resolved, resolvedExt, size)
     }
 
     /// realpath(3): absolute, symlink-free path, or nil if it doesn't exist.
