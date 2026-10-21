@@ -4,7 +4,9 @@
 
 <h1>PreviewMD</h1>
 
-**The missing Markdown viewer for macOS — free, native, private, and Obsidian-friendly.**
+**Press Space on any Markdown file in Finder — and read it, beautifully.**
+
+<sub>Free, native Quick Look previews for `.md` files, plus a fast reader app. Private and open source.</sub>
 
 [![Latest release](https://img.shields.io/github/v/release/ychani/Preview-md?label=release)](https://github.com/ychani/Preview-md/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ychani/Preview-md/total)](https://github.com/ychani/Preview-md/releases)
@@ -13,35 +15,30 @@
 [![License: MIT](https://img.shields.io/github/license/ychani/Preview-md)](LICENSE)
 [![CI](https://github.com/ychani/Preview-md/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/ychani/Preview-md/actions/workflows/ci.yml)
 
-[Install](#install) · [Features](#features) · [Quick Look](#quick-look) · [Privacy](#privacy) · [FAQ](#faq) · [Contributing](#contributing)
+[Quick Look](#quick-look) · [Install](#install) · [The app](#the-app) · [Privacy](#privacy) · [FAQ](#faq) · [Contributing](#contributing)
 
 </div>
 
-<picture>
-  <img src="docs/images/hero-light.png" alt="PreviewMD window with a folder of Markdown notes in the sidebar and a rendered document" width="900">
-</picture>
+<img src="docs/images/quicklook-hero.png" alt="A Finder window with the Quick Look panel open, showing a Markdown file rendered with headings, a table, and a task list" width="900">
 
-PreviewMD is a small native Mac app for reading Markdown: open a file or a whole folder of notes and read them rendered, with wikilinks, Mermaid diagrams, and live reload. It also adds a Quick Look extension, so you can press Space on a `.md` file in Finder to preview it.
+Select a Markdown file in Finder and press Space: it opens fully rendered in Quick Look — headings, tables, code, and front matter, not raw text. Once the extension is turned on, this works without opening PreviewMD at all. When you want more, the PreviewMD app lets you browse a whole folder of notes, follow wikilinks, see Mermaid diagrams, and edit.
 
-## Why PreviewMD?
+## Quick Look
 
-Many Markdown apps are editors or note-taking tools. PreviewMD is a reader first: it opens your files where they are, with nothing to import. Here is how it compares with some well-known Mac apps:
+Previews follow light and dark mode and show:
 
-| | PreviewMD | [QLMarkdown](https://github.com/sbarex/QLMarkdown) | [MacDown](https://github.com/MacDownApp/macdown) | [Typora](https://typora.io) | [Obsidian](https://obsidian.md) |
-|---|:-:|:-:|:-:|:-:|:-:|
-| Built for | Reading | Quick Look | Editing | Editing | Knowledge base |
-| App window to read files | ✅ | ❌¹ | ✅ | ✅ | ✅ |
-| Quick Look preview | ✅ | ✅ | — | — | — |
-| Folder explorer | ✅ | ❌ | — | ✅ | ✅ |
-| Wikilinks | ✅ | ✅ | — | — | ✅ |
-| Free | ✅ | ✅ | ✅ | Paid, with trial | ✅² |
-| Open source | ✅ MIT | ✅ GPL-3.0 | ✅ MIT | — | ❌ |
-| Native macOS app | ✅ | ✅ | ✅ | — | ❌ Electron |
+- **GitHub-flavored Markdown**: headings, lists, links, block quotes, tables, task lists, and code blocks, styled with the same stylesheet as the app.
+- **Front matter** as a compact properties table at the top.
+- **Wikilinks and embeds** (`[[note]]`, `![[image.png]]`) as styled text.
+- **Common Markdown types**: `.md`, `.markdown`, R Markdown (`.Rmd`), and Quarto (`.qmd`), on macOS 13 Ventura or later.
 
-<sub>✅ yes · ❌ no · — not stated in the project's own README or website. Taken from each project's README, website, or help pages in October 2026. Corrections are welcome.<br>
-¹ QLMarkdown's app is for configuring its previews and says it is not meant to be a standalone viewer. ² Obsidian is free; a commercial license is optional.</sub>
+**Safe by design.** The preview is rendered ahead of time with [marked](https://github.com/markedjs/marked) in JavaScriptCore, so Quick Look shows static HTML. It runs no JavaScript, loads nothing from the network, and is locked down by a strict Content-Security-Policy that blocks scripts, frames, forms, and remote images.
 
-All of these are good apps. Use PreviewMD when you want to read Markdown, including an Obsidian vault, without opening an editor or a note-taking app.
+**Limits.** Because previews run no JavaScript, **Mermaid diagrams are not drawn**, and wikilinks can't be clicked. Files over 2 MB are cut off, with a note saying so.
+
+<img src="docs/images/quicklook.png" alt="A Quick Look preview of a Markdown file in Finder" width="800">
+
+To turn it on, see [Turn on Quick Look](#turn-on-quick-look).
 
 ## Install
 
@@ -58,11 +55,11 @@ Download the notarized `PreviewMD-<version>.dmg` from [GitHub Releases](https://
 > [!NOTE]
 > PreviewMD needs macOS 13 Ventura or later. It is a universal app that runs natively on Apple silicon and Intel Macs.
 
-### Enable Quick Look
+### Turn on Quick Look
 
-1. Launch PreviewMD once from Applications so macOS registers its Quick Look extension.
-2. Press Space on any `.md` file in Finder.
-3. If the preview doesn't appear, make sure the extension is turned on: **System Settings → General → Login Items & Extensions → Quick Look** (macOS 15+) or **System Settings → Privacy & Security → Extensions → Quick Look** (macOS 13–14).
+1. **Launch PreviewMD** from Applications. This registers its Quick Look extension with macOS.
+2. **Select any `.md` file in Finder and press Space.** It should appear rendered.
+3. **No preview?** Make sure the extension is on: **System Settings → General → Login Items & Extensions → Quick Look** (macOS 15+) or **System Settings → Privacy & Security → Extensions → Quick Look** (macOS 13–14).
 
 > [!TIP]
 > Still seeing an old preview or plain text? Reset Quick Look with `qlmanage -r && qlmanage -r cache`, then try again.
@@ -93,7 +90,9 @@ defaults delete com.preview-md.app 2>/dev/null || true
 
 </details>
 
-## Features
+## The app
+
+<img src="docs/images/hero-light.png" alt="PreviewMD window with a folder of Markdown notes in the sidebar and a rendered document" width="900">
 
 ### Reading & editing
 
@@ -126,18 +125,25 @@ defaults delete com.preview-md.app 2>/dev/null || true
 - **Data-loss guards** ask before you switch files or quit with unsaved edits, and before you overwrite a file that changed on disk. Files over 5 MB open read-only.
 - **VoiceOver labels** on the toolbar, sidebar, Find bar, and table of contents, and faint text that meets WCAG AA contrast.
 
-## Quick Look
+## Why PreviewMD?
 
-Select a Markdown file in Finder and press Space to see it rendered, front-matter table included. See [Enable Quick Look](#enable-quick-look) if nothing happens.
+Many Markdown apps are editors or note-taking tools. PreviewMD is a reader first: it opens your files where they are, with nothing to import. Here is how it compares with some well-known Mac apps:
 
-Quick Look previews are meant to be fast and safe, so they are more limited than the app:
+| | PreviewMD | [QLMarkdown](https://github.com/sbarex/QLMarkdown) | [MacDown](https://github.com/MacDownApp/macdown) | [Typora](https://typora.io) | [Obsidian](https://obsidian.md) |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Quick Look preview | ✅ | ✅ | — | — | — |
+| Built for | Reading | Quick Look | Editing | Editing | Knowledge base |
+| App window to read files | ✅ | ❌¹ | ✅ | ✅ | ✅ |
+| Folder explorer | ✅ | ❌ | — | ✅ | ✅ |
+| Wikilinks | ✅ | ✅ | — | — | ✅ |
+| Free | ✅ | ✅ | ✅ | Paid, with trial | ✅² |
+| Open source | ✅ MIT | ✅ GPL-3.0 | ✅ MIT | — | ❌ |
+| Native macOS app | ✅ | ✅ | ✅ | — | ❌ Electron |
 
-- Rendering is static. The preview runs no JavaScript, so **Mermaid diagrams are not drawn**.
-- Wikilinks and embeds show as styled text and can't be clicked.
-- Remote content is never loaded.
-- Files over 2 MB are cut off, with a note saying so.
+<sub>✅ yes · ❌ no · — not stated in the project's own README or website. Taken from each project's README, website, or help pages in October 2026. Corrections are welcome.<br>
+¹ QLMarkdown's app is for configuring its previews and says it is not meant to be a standalone viewer. ² Obsidian is free; a commercial license is optional.</sub>
 
-<img src="docs/images/quicklook.png" alt="A Quick Look preview of a Markdown file in Finder" width="800">
+All of these are good apps. Use PreviewMD when you want to read Markdown, including an Obsidian vault, without opening an editor or a note-taking app.
 
 ## Privacy
 
@@ -167,7 +173,7 @@ Quick Look previews are meant to be fast and safe, so they are more limited than
 ## FAQ
 
 **Quick Look doesn't show my file rendered.**
-Launch PreviewMD once from Applications, make sure the extension is turned on (see [Enable Quick Look](#enable-quick-look)), then run `qlmanage -r && qlmanage -r cache`. If another Markdown Quick Look extension is installed, Finder may pick that one instead.
+Launch PreviewMD once from Applications, make sure the extension is turned on (see [Turn on Quick Look](#turn-on-quick-look)), then run `qlmanage -r && qlmanage -r cache`. If another Markdown Quick Look extension is installed, Finder may pick that one instead.
 
 **I used Preview-MD before, and Finder still shows the old preview.**
 The old `Preview-MD.app` has its own Quick Look extension. Delete it as shown under [Uninstall / upgrading from Preview-MD](#install), then reset Quick Look.
