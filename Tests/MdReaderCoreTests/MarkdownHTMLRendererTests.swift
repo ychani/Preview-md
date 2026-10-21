@@ -277,12 +277,55 @@ final class MarkdownHTMLRendererTests: XCTestCase {
         XCTAssertFalse(html.contains("wikilink"), html)
     }
 
-    func testImageEmbedRendersAsSpanInStaticMode() throws {
-        let html = try MarkdownHTMLRenderer.renderBody(markdown: "![[x.png]] ![[pics/y.jpg|300]] ![[note]]")
-        XCTAssertFalse(html.contains("<img"), html)
-        XCTAssertTrue(html.contains("<span class=\"wikilink\">x.png</span>"), html)
-        XCTAssertTrue(html.contains("<span class=\"wikilink\">y.jpg</span>"), html)
+    func testImageEmbedRendersAsMarkedImgInStaticMode() throws {
+        let html = try MarkdownHTMLRenderer.renderBody(
+            markdown: "![[x.png]] ![[pics/my y.jpg|300]] ![[z.png|200x100]] ![[a.png|Alt]] ![[note]]")
+        XCTAssertTrue(html.contains("<img src=\"x.png\" alt=\"x.png\" data-previewmd-embed=\"\">"), html)
+        XCTAssertTrue(html.contains(
+            "<img src=\"pics/my%20y.jpg\" alt=\"my y.jpg\" width=\"300\" data-previewmd-embed=\"\">"), html)
+        XCTAssertTrue(html.contains(
+            "<img src=\"z.png\" alt=\"z.png\" width=\"200\" height=\"100\" data-previewmd-embed=\"\">"), html)
+        XCTAssertTrue(html.contains("alt=\"Alt\""), html)
+        // Note embeds stay text.
         XCTAssertTrue(html.contains("<span class=\"wikilink\">note</span>"), html)
+    }
+
+    func testImageEmbedTargetIsEscaped() throws {
+        let html = try MarkdownHTMLRenderer.renderBody(markdown: "![[a\"onerror=x.png]]")
+        XCTAssertFalse(html.contains("\"onerror"), html)
+        XCTAssertFalse(html.lowercased().contains(" onerror="), html)
+    }
+
+    // MARK: - Quick Look image blocking
+
+    func testCSPAllowsOnlyCidAndDataImages() throws {
+        let doc = try MarkdownHTMLRenderer.renderDocument(markdown: "# T")
+        let csp = try XCTUnwrap(cspContent(of: doc))
+        XCTAssertTrue(csp.contains("img-src cid: data:;"), csp)
+        XCTAssertFalse(csp.contains("file:"), csp)
+    }
+
+    func testRemoteAndFileImagesRemovedFromDocument() throws {
+        let doc = try MarkdownHTMLRenderer.renderDocument(markdown: """
+            [link](https://example.com/page)
+
+            ![r](https://example.com/a.png) ![f](file:///etc/a.png) ![rel](../a.png)
+            <img src="http://x/t.gif" srcset="https://x/2x.png 2x" alt="raw">
+            <img src="data:image/png;base64,AAAA" alt="inline">
+            <video poster="https://x/p.png" src="https://x/v.mp4"></video>
+            <p style="background:url(https://x/bg.png)">s</p>
+            <p style="color: red">ok</p>
+            <table background="https://x/t.png"><tr><td>c</td></tr></table>
+            <svg><image href="https://x/i.png"/><use xlink:href="https://x/u.svg#a"/></svg>
+            """, title: "t.md", imageFolder: nil).html
+        let body = try XCTUnwrap(doc.components(separatedBy: "<body>").last)
+        for leak in ["https://x/", "http://x/", "example.com/a.png", "file:///", "../a.png", "srcset"] {
+            XCTAssertFalse(body.contains(leak), "\(leak) survived: \(body)")
+        }
+        XCTAssertTrue(body.contains("alt=\"r\""), body)
+        XCTAssertTrue(body.contains("src=\"data:image/png;base64,AAAA\""), body)
+        XCTAssertTrue(body.contains("style=\"color: red\""), body)
+        XCTAssertTrue(body.contains("href=\"https://example.com/page\""), "links are not loads: \(body)")
     }
 
     func testWikiLinkAliasInjectionEscaped() throws {

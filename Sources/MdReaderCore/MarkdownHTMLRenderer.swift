@@ -18,17 +18,54 @@ public enum MarkdownHTMLRenderer {
         }
     }
 
+    /// A rendered Quick Look document plus the local images it references
+    /// as `cid:` URLs (see `LocalImageInliner`).
+    public struct RenderedDocument {
+        public let html: String
+        /// Content-ID (without `cid:`) -> image bytes and type.
+        public let attachments: [String: InlinedImage]
+        /// Local images left out because a size/count budget was exhausted.
+        public let skipped: Int
+        /// Local-looking image references refused by the path or content
+        /// policy, or missing.
+        public let refused: Int
+    }
+
     /// Renders a full HTML document for the given markdown.
     ///
-    /// The security control is the Content-Security-Policy meta tag: no
-    /// scripts, plugins, frames, forms, `<base>` rewrites or remote loads
-    /// (tracking pixels in previews of untrusted files), only inline styles
-    /// and `data:`/`file:` images. Quick Look also doesn't execute JavaScript.
-    /// `sanitize(_:)` is defense-in-depth on top of that, not the boundary.
+    /// Security: the Content-Security-Policy meta tag allows no scripts,
+    /// plugins, frames, forms, `<base>` rewrites or remote loads, only inline
+    /// styles and `cid:`/`data:` images, and Quick Look doesn't execute
+    /// JavaScript. Quick Look was observed loading remote images despite the
+    /// CSP, so `blockExternalImages(_:)` also removes every image URL that
+    /// isn't `cid:`/`data:` (no tracking pixels in previews of untrusted
+    /// files). `sanitize(_:)` is defense-in-depth on top of both.
     public static func renderDocument(markdown: String, title: String = "") throws -> String {
-        let body = try renderBody(markdown: markdown)
+        try renderDocument(markdown: markdown, title: title, imageFolder: nil).html
+    }
+
+    /// Like `renderDocument(markdown:title:)`; with an `imageFolder` (the
+    /// previewed file's folder) it also inlines relative local images from
+    /// that folder and its subfolders as `cid:` attachments. Remote images
+    /// stay blocked by the CSP.
+    public static func renderDocument(
+        markdown: String, title: String = "", imageFolder: URL?,
+        limits: LocalImageInliner.Limits = .quickLook
+    ) throws -> RenderedDocument {
+        var body = try renderBody(markdown: markdown)
+        var attachments: [String: InlinedImage] = [:]
+        var skipped = 0
+        var refused = 0
+        if let imageFolder {
+            let inlined = LocalImageInliner.inline(html: body, documentFolder: imageFolder, limits: limits)
+            body = inlined.html
+            attachments = inlined.attachments
+            skipped = inlined.skipped
+            refused = inlined.refused
+        }
+        body = blockExternalImages(body)
         let css = loadCSS()
-        return """
+        let html = """
         <!DOCTYPE html>
         <html>
         <head>
@@ -44,6 +81,7 @@ public enum MarkdownHTMLRenderer {
         </body>
         </html>
         """
+        return RenderedDocument(html: html, attachments: attachments, skipped: skipped, refused: refused)
     }
 
     /// Renders markdown to an HTML fragment via marked.js in JavaScriptCore.
@@ -77,8 +115,9 @@ public enum MarkdownHTMLRenderer {
         return sanitize(html)
     }
 
-    /// Front matter tables and `[[wikilinks]]` (as plain spans — Quick Look
-    /// has no navigation) via the same markdown-extensions.js the app uses.
+    /// Front matter tables, `[[wikilinks]]` (as plain spans — Quick Look
+    /// has no navigation) and `![[image.png]]` embeds (as `<img>` tags marked
+    /// `data-previewmd-embed`, resolved by `LocalImageInliner`) via the same markdown-extensions.js the app uses.
     /// Best effort: if the script is missing or throws, plain marked output
     /// is still a correct preview.
     private static func installExtensions(in ctx: JSContext) {
@@ -96,6 +135,8 @@ public enum MarkdownHTMLRenderer {
     /// scripts, objects and frames; they're repeated so the policy reads as the
     /// control it is. `base-uri` and `form-action` don't fall back to
     /// `default-src`, so they must be listed. Nothing remote (`https:`) is allowed.
+    /// Images come only from `cid:` attachments (`LocalImageInliner`, which
+    /// enforces the local path policy) or inline `data:` URIs — no `file:`.
     static let contentSecurityPolicy = [
         "default-src 'none'",
         "script-src 'none'",
@@ -103,7 +144,7 @@ public enum MarkdownHTMLRenderer {
         "frame-src 'none'",
         "base-uri 'none'",
         "form-action 'none'",
-        "img-src data: file:",
+        "img-src cid: data:",
         "style-src 'unsafe-inline'",
     ].joined(separator: "; ") + ";"
 
@@ -137,12 +178,6 @@ public enum MarkdownHTMLRenderer {
             out = next
         }
 
-        // Start tags: quoted values may contain `>`. Spans never cross a bare
-        // `<`, so an unbalanced quote can't swallow the rest of the document
-        // (the second alternative catches that case).
-        let startTag = #"<[a-z](?:"[^"]*"|'[^']*'|[^"'<>])*>|<[a-z][^<>]*>"#
-        // name = value, after a space, `/`, or the previous value's closing quote
-        let attribute = #"(?<=[\s/"'])[^\s/>="']+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)"#
         return replaceMatches(in: out, pattern: startTag) { tag in
             replaceMatches(in: tag, pattern: attribute) { attr in
                 isDangerousAttribute(attr) ? "" : attr
@@ -150,15 +185,79 @@ public enum MarkdownHTMLRenderer {
         }
     }
 
-    /// `attr` is one match of the attribute pattern: name, `=`, value.
-    private static func isDangerousAttribute(_ attr: String) -> Bool {
-        guard let eq = attr.firstIndex(of: "=") else { return false }
+    /// Removes every image/media URL that isn't `cid:` or `data:` from the
+    /// Quick Look document, so nothing is fetched from the network or disk
+    /// even though Quick Look's renderer was observed (macOS 26) loading
+    /// remote `https:` images despite the meta CSP. Per start tag:
+    /// - `src`, `poster`, `background` (any tag), and `href`/`xlink:href` on
+    ///   SVG `<image>`, `<feImage>`, `<use>`: dropped unless `cid:`/`data:`;
+    /// - `srcset`: always dropped (LocalImageInliner never produces one);
+    /// - `style`: dropped if it could load anything (`url(`, `image-set(`,
+    ///   `@import`, or any CSS escape).
+    /// An `<img>` that loses its `src` still shows its `alt` text.
+    static func blockExternalImages(_ html: String) -> String {
+        replaceMatches(in: html, pattern: startTag) { tag in
+            let tagName = tag.range(of: #"^<[a-z][a-z0-9:-]*"#, options: [.regularExpression, .caseInsensitive])
+                .map { tag[$0].dropFirst().lowercased() } ?? ""
+            let hrefIsResource = ["image", "feimage", "use", "svg:image", "svg:use"].contains(tagName)
+            // With the whitespace before each attribute, so dropping one
+            // leaves no gap.
+            return replaceMatches(in: tag, pattern: #"\s*"# + attribute) { attr in
+                guard let (name, value) = attributeParts(attr) else { return attr }
+                switch name {
+                case "srcset":
+                    return ""
+                case "style":
+                    return styleCanLoad(value) ? "" : attr
+                case "src", "poster", "background":
+                    return isInlineImageURL(value) ? attr : ""
+                case "href", "xlink:href":
+                    return !hrefIsResource || isInlineImageURL(value) ? attr : ""
+                default:
+                    return attr
+                }
+            }
+        }
+    }
+
+    private static func isInlineImageURL(_ value: String) -> Bool {
+        let url = String(String.UnicodeScalarView(
+            LocalImageInliner.decodeHTMLEntities(value).unicodeScalars.filter { $0.value > 0x20 && $0.value != 0x7F }
+        )).lowercased()
+        return url.hasPrefix("cid:") || url.hasPrefix("data:")
+    }
+
+    private static func styleCanLoad(_ value: String) -> Bool {
+        let css = LocalImageInliner.decodeHTMLEntities(value).lowercased()
+            .filter { !$0.isWhitespace }
+        return css.contains("\\") || css.contains("url(") || css.contains("image-set(")
+            || css.contains("@import") || css.contains("image(")
+    }
+
+    /// A start tag. Quoted values may contain `>`. Spans never cross a bare
+    /// `<`, so an unbalanced quote can't swallow the rest of the document
+    /// (the second alternative catches that case).
+    static let startTag = #"<[a-z](?:"[^"]*"|'[^']*'|[^"'<>])*>|<[a-z][^<>]*>"#
+    /// One `name = value` attribute inside a start tag, after a space, `/`,
+    /// or the previous value's closing quote.
+    static let attribute = #"(?<=[\s/"'])[^\s/>="']+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)"#
+
+    /// Splits one match of `attribute` into its lowercased name and its value
+    /// with the surrounding quotes removed (entities still encoded).
+    static func attributeParts(_ attr: String) -> (name: String, value: String)? {
+        guard let eq = attr.firstIndex(of: "=") else { return nil }
         let name = attr[..<eq].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if name.hasPrefix("on") { return true }
         var value = attr[attr.index(after: eq)...].trimmingCharacters(in: .whitespacesAndNewlines)
         if let quote = value.first, quote == "\"" || quote == "'" {
             value = String(value.dropFirst().dropLast())
         }
+        return (name, value)
+    }
+
+    /// `attr` is one match of the attribute pattern: name, `=`, value.
+    private static func isDangerousAttribute(_ attr: String) -> Bool {
+        guard let (name, value) = attributeParts(attr) else { return false }
+        if name.hasPrefix("on") { return true }
         // Browsers ignore whitespace and control characters in a URL scheme.
         let scheme = String(String.UnicodeScalarView(
             decodeEntities(value).unicodeScalars.filter { $0.value > 0x20 && $0.value != 0x7F }
@@ -168,7 +267,7 @@ public enum MarkdownHTMLRenderer {
 
     /// Decodes numeric character references plus the named ones that matter
     /// for URL schemes (`&colon;`, `&Tab;`, `&NewLine;`). Not a general decoder.
-    private static func decodeEntities(_ text: String) -> String {
+    static func decodeEntities(_ text: String) -> String {
         var out = replaceMatches(in: text, pattern: #"&#(x[0-9a-f]+|[0-9]+);?"#) { ref in
             let digits = ref.dropFirst(2).filter { $0 != ";" }
             let code = digits.lowercased().hasPrefix("x")
@@ -183,7 +282,7 @@ public enum MarkdownHTMLRenderer {
     }
 
     /// Replaces each (case-insensitive) match of `pattern` with `transform(match)`.
-    private static func replaceMatches(in text: String, pattern: String,
+    static func replaceMatches(in text: String, pattern: String,
                                        _ transform: (String) -> String) -> String {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
             return text

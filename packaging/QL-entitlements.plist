@@ -4,5 +4,13 @@
 <dict>
     <key>com.apple.security.app-sandbox</key><true/>
     <key>com.apple.security.files.user-selected.read-only</key><true/>
+    <!-- Quick Look only extends the sandbox to the previewed file. Relative
+         images next to it are read by LocalImageInliner, whose path policy
+         (the file's folder and subfolders, no `..`, symlinks resolved, real
+         image bytes) is the actual boundary. Read-only. -->
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/</string>
+    </array>
 </dict>
 </plist>
