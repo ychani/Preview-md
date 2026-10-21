@@ -13,7 +13,7 @@ import UnivocalClient
 /// `NSRegularExpression` are UTF-16 native, so emoji, CJK, CRLF and combining
 /// sequences produce the ranges a correct server would.
 ///
-/// * Sentences end after `[.!?]+` followed by whitespace, and at every `\n`
+/// * Sentences end after `[.!?]+` followed by whitespace, after CJK `。！？`, and at every `\n`
 ///   (so `\n\n` is always a boundary). Ranges are trimmed of whitespace.
 /// * Words are runs of non-whitespace with leading/trailing punctuation
 ///   trimmed, widened to whole composed character sequences (never splitting a
@@ -41,9 +41,9 @@ public enum MockTextAnalyzer {
         return Analysis(sentences: r.sentences, words: r.words)
     }
 
-    private static let boundaryRegex = try! NSRegularExpression(pattern: "[.!?]+(?=\\s)|\\n")
+    private static let boundaryRegex = try! NSRegularExpression(pattern: "[.!?]+(?=\\s)|[。！？]+|\\n")
     private static let tokenRegex = try! NSRegularExpression(pattern: "\\S+")
-    private static let trimmable: Set<unichar> = Set(".,;:!?\"'()[]{}“”‘’«»…*_`~<>".utf16)
+    private static let trimmable: Set<unichar> = Set(".,;:!?\"'()[]{}“”‘’«»…*_`~<>。！？、，：；「」『』（）".utf16)
 
     /// End offset of the last sentence boundary inside `[from, to)`, if any.
     static func lastBoundaryEnd(_ s: NSString, from: Int, to: Int) -> Int? {
@@ -80,18 +80,25 @@ public enum MockTextAnalyzer {
         var si = 0
         tokenRegex.enumerateMatches(in: s as String, range: region) { m, _, _ in
             guard let m else { return }
-            var a = m.range.location, b = m.range.location + m.range.length
-            while a < b, trimmable.contains(s.character(at: a)) { a += 1 }
-            while b > a, trimmable.contains(s.character(at: b - 1)) { b -= 1 }
-            guard a < b else { return }
-            // Never split a surrogate pair or a composed sequence; stay inside the token.
-            let widened = s.rangeOfComposedCharacterSequences(for: NSRange(location: a, length: b - a))
-            a = max(widened.location, m.range.location)
-            b = min(widened.location + widened.length, m.range.location + m.range.length)
-            while si < sentences.count, sentences[si].upperBound <= a { si += 1 }
-            guard si < sentences.count else { return }
-            let repeats = s.character(at: a) == 0x24 /* $ */ && b - a > 1 && isDigit(s.character(at: a + 1)) ? 3 : 1
-            words.append(Word(range: a..<b, sentence: sentenceBase + si, repeats: repeats))
+            let tokenStart = m.range.location, tokenEnd = m.range.location + m.range.length
+            while si < sentences.count, sentences[si].upperBound <= tokenStart { si += 1 }
+            // A token can cross a sentence end when no space follows it (CJK `。`):
+            // split it at every sentence it overlaps.
+            var k = si
+            while k < sentences.count, sentences[k].lowerBound < tokenEnd {
+                var a = max(tokenStart, sentences[k].lowerBound), b = min(tokenEnd, sentences[k].upperBound)
+                while a < b, trimmable.contains(s.character(at: a)) { a += 1 }
+                while b > a, trimmable.contains(s.character(at: b - 1)) { b -= 1 }
+                if a < b {
+                    // Never split a surrogate pair or a composed sequence; stay inside the token.
+                    let widened = s.rangeOfComposedCharacterSequences(for: NSRange(location: a, length: b - a))
+                    a = max(widened.location, tokenStart)
+                    b = min(widened.location + widened.length, tokenEnd)
+                    let repeats = s.character(at: a) == 0x24 /* $ */ && b - a > 1 && isDigit(s.character(at: a + 1)) ? 3 : 1
+                    words.append(Word(range: a..<b, sentence: sentenceBase + k, repeats: repeats))
+                }
+                k += 1
+            }
         }
         return (sentences, words)
     }
@@ -151,12 +158,15 @@ final class MockReading: @unchecked Sendable {
     // MARK: Text
 
     func append(_ chunk: String, more: Bool) {
+        let previousLength = text.length
         text.append(chunk)
         utf8Bytes += chunk.utf8.count
         morePending = more
         let length = text.length
         // While more text is pending, hold the trailing partial sentence (SPEC §8).
-        let limit = more ? (MockTextAnalyzer.lastBoundaryEnd(text, from: analyzedUpTo, to: length) ?? analyzedUpTo) : length
+        // Only the new tail (plus a few units of context) can hold a new boundary.
+        let scanFrom = max(analyzedUpTo, previousLength - 8)
+        let limit = more ? (MockTextAnalyzer.lastBoundaryEnd(text, from: scanFrom, to: length) ?? analyzedUpTo) : length
         if limit > analyzedUpTo {
             let r = MockTextAnalyzer.analyze(text, from: analyzedUpTo, to: limit, sentenceBase: sentences.count)
             sentences.append(contentsOf: r.sentences)
@@ -184,8 +194,12 @@ final class MockReading: @unchecked Sendable {
         }
         engine.sessionEvent(self, ["type": "state", "state": "loading", "detail": "Starting speech engine…"])
         let delay = engine.behaviour.loadingDelay.timeInterval
-        engine.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            self?.loadingFinished()
+        if delay <= 0 {
+            loadingFinished()   // deterministic for tests: ok, loading, playing in one turn
+        } else {
+            engine.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.loadingFinished()
+            }
         }
     }
 

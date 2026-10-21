@@ -389,9 +389,14 @@ private final class Probe {
         let padLength = 1_048_576 - shell.count - 1
         let big = try UnivocalWire.frame(["type": "ping", "id": 11, "pad": .string(String(repeating: "a", count: padLength))])
         check("S4", big.count == 1_048_576, "probe built a \(big.count)-byte frame")
-        try c.sendRaw(big)
-        let p = try c.next(timeout: 10)
-        check("S4", p?.messageType == "pong" && p?["id"] == .int(11), "1 MiB frame not accepted")
+        do {
+            try c.sendRaw(big)
+        } catch {
+            fail("S4", "server closed while receiving a 1 MiB frame")
+        }
+        let p = try? c.next(timeout: 10)
+        check("S4", p?.messageType == "pong" && p?["id"] == .int(11),
+              "1 MiB frame not accepted (got \(p?.messageType ?? "nothing") \(p?.string("code") ?? ""))")
         c.close()
 
         // Oversize: maxFrameBytes + 64 bytes with no newline yet → protocolError, fatal.
