@@ -19,8 +19,7 @@
 
 </div>
 
-<!-- TODO: replace with docs/images/quicklook-hero.png (real Finder + Space-bar Quick Look capture) -->
-<img src="docs/images/quicklook.png" alt="A Quick Look preview of a Markdown file: a front-matter properties table, headings, and links" width="720">
+<img src="docs/images/quicklook-hero.png" alt="Pressing Space in Finder opens a Quick Look preview of a Markdown file with a properties table, headings, a table, and a task list" width="820">
 
 Select a Markdown file in Finder and press Space: it opens fully rendered in Quick Look — headings, tables, code, and front matter, not raw text. Once the extension is turned on, this works without opening PreviewMD at all. When you want more, the PreviewMD app lets you browse a whole folder of notes, follow wikilinks, see Mermaid diagrams, and edit.
 
