@@ -144,9 +144,10 @@ test:
 # staple → spctl) → dmg (staging dir + Applications link → sign) → notarize
 # (submit → staple → spctl) → release (notes from CHANGELOG → draft GH release).
 
-# Fails before any build or network call when notarization cannot succeed.
-# The profile check looks for the keychain item `notarytool store-credentials`
-# creates; set NOTARY_SKIP_PROFILE_CHECK=1 if your profile lives elsewhere.
+# Fails before any build when notarization cannot succeed. The profile check
+# asks notarytool itself (one quick request to Apple), since the keychain item's
+# layout differs between API-key and Apple ID profiles; set
+# NOTARY_SKIP_PROFILE_CHECK=1 to skip it.
 check-notary:
 	@if [ "$(SIGN_IDENTITY)" = "-" ]; then \
 		echo "error: notarization needs a Developer ID, but SIGN_IDENTITY is ad-hoc (-)."; \
@@ -154,11 +155,8 @@ check-notary:
 		exit 1; \
 	fi
 	@if [ -z "$(NOTARY_SKIP_PROFILE_CHECK)" ] && \
-	   ! security find-generic-password -s com.apple.gke.notary.tool \
-	        -a "com.apple.gke.notary.tool.saved-creds.$(NOTARY_PROFILE)" >/dev/null 2>&1 && \
-	   ! security find-generic-password -s com.apple.gke.notary.tool \
-	        -a "$(NOTARY_PROFILE)" >/dev/null 2>&1; then \
-		echo "error: notarytool keychain profile '$(NOTARY_PROFILE)' not found."; \
+	   ! xcrun notarytool history --keychain-profile "$(NOTARY_PROFILE)" >/dev/null 2>&1; then \
+		echo "error: notarytool keychain profile '$(NOTARY_PROFILE)' not found or not working."; \
 		echo "       Create it: xcrun notarytool store-credentials $(NOTARY_PROFILE) --apple-id ... --team-id ..."; \
 		echo "       (or NOTARY_PROFILE=<name>; NOTARY_SKIP_PROFILE_CHECK=1 to bypass this check)"; \
 		exit 1; \
