@@ -10,8 +10,8 @@
 
 [![Latest release](https://img.shields.io/github/v/release/ychani/Preview-md?label=release)](https://github.com/ychani/Preview-md/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/ychani/Preview-md/total)](https://github.com/ychani/Preview-md/releases)
-![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)
-![Universal](https://img.shields.io/badge/Universal-Apple%20silicon%20%7C%20Intel-blue)
+[![macOS 13+](https://img.shields.io/badge/macOS-13%2B-blue)](#install)
+[![Universal](https://img.shields.io/badge/Universal-Apple%20silicon%20%7C%20Intel-blue)](#install)
 [![License: MIT](https://img.shields.io/github/license/ychani/Preview-md)](LICENSE)
 [![CI](https://github.com/ychani/Preview-md/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/ychani/Preview-md/actions/workflows/ci.yml)
 
@@ -29,13 +29,13 @@ Previews follow light and dark mode and show:
 
 - **GitHub-flavored Markdown**: headings, lists, links, block quotes, tables, task lists, and code blocks, styled with the same stylesheet as the app.
 - **Front matter** as a compact properties table at the top.
-- **Wikilinks and embeds** (`[[note]]`, `![[image.png]]`) as styled text.
+- **Local images** next to the file: relative images (`img/pic.png`) and Obsidian embeds (`![[image.png]]`, looked up beside the file and in its `attachments/`, `assets/`, or `images/` folder). Only images in the file's own folder and its subfolders are shown — no `../` — up to 4 MB each and 16 MB per preview.
+- **Wikilinks** (`[[note]]`) as styled text, and **code blocks** labeled with their language.
 - **Common Markdown types**: `.md`, `.markdown`, R Markdown (`.Rmd`), and Quarto (`.qmd`), on macOS 13 Ventura or later.
 
-**Safe by design.** The preview is rendered ahead of time with [marked](https://github.com/markedjs/marked) in JavaScriptCore, so Quick Look shows static HTML. It runs no JavaScript, loads nothing from the network, and is locked down by a strict Content-Security-Policy that blocks scripts, frames, forms, and remote images.
+**Safe by design.** The preview is rendered ahead of time with [marked](https://github.com/markedjs/marked) in JavaScriptCore, so Quick Look shows static HTML. It runs no JavaScript and loads nothing from the network: remote images are removed before the preview is shown, and a strict Content-Security-Policy blocks scripts, frames, and forms. Quick Look only gives an extension access to the previewed file itself, so the extension has a read-only sandbox exception that it uses only to read images in the file's folder and subfolders.
 
-**Limits.** Because previews run no JavaScript, **Mermaid diagrams are not drawn**, and wikilinks can't be clicked. Files over 2 MB are cut off, with a note saying so.
-
+**Limits.** Because previews run no JavaScript, **Mermaid diagrams are not drawn**, and wikilinks can't be clicked. Remote images are never shown. Files over 2 MB are cut off, with a note saying so.
 
 To turn it on, see [Turn on Quick Look](#turn-on-quick-look).
 
@@ -49,7 +49,7 @@ brew install --cask ychani/tap/previewmd
 
 ### Download
 
-Download the notarized `PreviewMD-<version>.dmg` from [GitHub Releases](https://github.com/ychani/Preview-md/releases), open it, and drag PreviewMD to Applications.
+Download the notarized `PreviewMD-<version>.dmg` from the [latest release](https://github.com/ychani/Preview-md/releases/latest), open it, and drag PreviewMD to Applications.
 
 > [!NOTE]
 > PreviewMD needs macOS 13 Ventura or later. It is a universal app that runs natively on Apple silicon and Intel Macs.
@@ -108,14 +108,14 @@ defaults delete com.preview-md.app 2>/dev/null || true
 ### Obsidian-friendly
 
 - **Wikilinks** such as `[[note]]`, `[[note|alias]]`, `[[note#heading]]`, and `[[folder/note]]` resolve across your workspace the way Obsidian resolves them. Links to missing notes are dimmed.
-- **Image embeds** like `![[image.png|300]]` load from anywhere in the same workspace folder, including `attachments/`.
+- **Image embeds** like `![[image.png|300]]` load from anywhere in the same workspace root, including `attachments/`.
 - **Front matter** at the top of a note appears as a compact properties table.
 
 <img src="docs/images/obsidian.png" alt="An Obsidian note in PreviewMD with a front-matter properties table, wikilinks, and an embedded image" width="800">
 
 ### Diagrams & navigation
 
-- **Mermaid diagrams** are drawn right in the preview.
+- **Mermaid diagrams** are drawn right in the preview, and code blocks are labeled with their language.
 - **Table of contents** panel and **Find** (⌘F, ⌘G / ⇧⌘G).
 - **Links that work**: `#heading` links scroll in place, links to other `.md` files open them in PreviewMD, and relative images load from disk.
 
@@ -133,7 +133,7 @@ Many Markdown apps are editors or note-taking tools. PreviewMD is a reader first
 | Quick Look preview | ✅ | ✅ | — | — | — |
 | Built for | Reading | Quick Look | Editing | Editing | Knowledge base |
 | App window to read files | ✅ | ❌¹ | ✅ | ✅ | ✅ |
-| Folder explorer | ✅ | ❌ | — | ✅ | ✅ |
+| Folder explorer | ✅ | — | — | ✅ | ✅ |
 | Wikilinks | ✅ | ✅ | — | — | ✅ |
 | Free | ✅ | ✅ | ✅ | Paid, with trial | ✅² |
 | Open source | ✅ MIT | ✅ GPL-3.0 | ✅ MIT | — | ❌ |
@@ -147,9 +147,9 @@ All of these are good apps. Use PreviewMD when you want to read Markdown, includ
 ## Privacy
 
 - **No telemetry, accounts, or update checks.** PreviewMD makes no network requests of its own, and all of its rendering libraries are bundled.
-- **Remote images are blocked** until you choose **Load remote images** for that document. The choice is never saved.
-- **Safe rendering:** HTML in your documents is cleaned with DOMPurify, and the preview runs under a strict Content-Security-Policy. If the sanitizer is unavailable, the document is shown as plain text.
-- **Local images** load only from inside the document's workspace folder (or its own folder), and only image files.
+- **Remote images are blocked** in the app until you choose **Load remote images** in the banner above that document. The choice is never saved. Quick Look never shows them.
+- **Safe rendering:** in the app, HTML in your documents is cleaned with DOMPurify, and the preview runs under a strict Content-Security-Policy. If the sanitizer is unavailable, the document is shown as plain text. Quick Look previews run no JavaScript at all.
+- **Local images** load only from inside the document's workspace folder (or its own folder), and only image files. Quick Look reads only images in the previewed file's folder and its subfolders, through a read-only sandbox exception used for nothing else.
 - Links open in your browser only when you click them.
 
 <img src="docs/images/remote-images.png" alt="The Load remote images banner above a document with blocked remote images" width="800">
