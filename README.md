@@ -97,6 +97,7 @@ defaults delete com.preview-md.app 2>/dev/null || true
 
 - **Preview, Split, and Edit views** (⌘1 / ⌘2 / ⌘3) with GitHub-style rendering that follows light and dark mode.
 - **Auto-reload** follows changes made in another app and asks first if you have unsaved edits.
+- **Read Aloud** (⇧⌘R) highlights each word and sentence as [Univocal](https://univocalapp.com) reads the preview to you, and scrolls along. Click a word to jump there; ⇧⌘. stops.
 - **Encoding-aware saving** keeps a file's original encoding (UTF-8, UTF-16, Latin-1/CP-1252, or Shift-JIS), byte-order mark, and line endings.
 
 ### Explorer & workspace
@@ -151,6 +152,7 @@ All of these are good apps. Use PreviewMD when you want to read Markdown, includ
 - **Safe rendering:** in the app, HTML in your documents is cleaned with DOMPurify, and the preview runs under a strict Content-Security-Policy. If the sanitizer is unavailable, the document is shown as plain text. Quick Look previews run no JavaScript at all.
 - **Local images** load only from inside the document's workspace folder (or its own folder), and only image files. Quick Look reads only images in the previewed file's folder and its subfolders, through a read-only sandbox exception used for nothing else.
 - Links open in your browser only when you click them.
+- **Read Aloud** sends the document's text to Univocal on the same Mac, only when you start reading, and only after you allow PreviewMD in Univocal.
 
 <img src="docs/images/remote-images.png" alt="The Load remote images banner above a document with blocked remote images" width="800">
 
@@ -168,6 +170,8 @@ All of these are good apps. Use PreviewMD when you want to read Markdown, includ
 | ⌥⌘R | Reveal in Finder |
 | ⌥⌘C | Copy Path |
 | ⇧⌥⌘C | Copy Relative Path (file inside the workspace) |
+| ⇧⌘R | Read Aloud / pause / resume |
+| ⇧⌘. | Stop reading |
 
 ## FAQ
 
@@ -188,7 +192,6 @@ In the standard macOS preferences for `com.narnarlabs.previewmd`. Run `defaults 
 
 ## Roadmap
 
-- **Read-aloud with word highlighting** via [Univocal](https://univocalapp.com) (coming).
 - Ideas: further multi-root workspace improvements. [Open an issue](https://github.com/ychani/Preview-md/issues) to suggest more.
 
 <details>
