@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-21
+
+First public release. Version 0.3.0 was never published; its changes ship here too.
+
 ### Added
 - **Folder explorer** — opening a folder shows every Markdown file in its
   subfolders as a VS Code–style tree (folders first, Finder order). Hidden

@@ -2,7 +2,7 @@
 # On each release: bump `version`, then set `sha256` to the output of
 #   shasum -a 256 dist/PreviewMD-<version>.dmg
 cask "previewmd" do
-  version "0.3.0"
+  version "0.4.0"
   sha256 "TODO"
 
   url "https://github.com/ychani/Preview-md/releases/download/v#{version}/PreviewMD-#{version}.dmg"
