@@ -6,9 +6,24 @@ public enum MarkdownRenderBridge {
     /// preview WebView. Uses JSONSerialization to guarantee the string is a valid JS
     /// literal regardless of backticks, quotes, backslashes, or embedded newlines.
     public static func renderJS(for markdown: String) -> String? {
+        renderJS(for: markdown, scroll: .keep)
+    }
+
+    /// Like `renderJS(for:)`, also telling `render()` what to do with the
+    /// scroll position: `.keep` sends no options (`render(md)`), `.top` sends
+    /// `{"resetScroll":true}`, `.restore(y)` sends `{"scrollY":y}`.
+    public static func renderJS(for markdown: String, scroll: RenderScroll) -> String? {
         guard let arr = jsonArrayLiteral(markdown) else { return nil }
         // `arr` is ["..."]; evaluating (arr)[0] yields the safely-encoded string.
-        return "render((\(arr))[0])"
+        switch scroll {
+        case .keep:
+            return "render((\(arr))[0])"
+        case .top:
+            return "render((\(arr))[0],{\"resetScroll\":true})"
+        case .restore(let y):
+            guard y.isFinite, y >= 0 else { return "render((\(arr))[0])" }
+            return "render((\(arr))[0],{\"scrollY\":\(y)})"
+        }
     }
 
     /// Like `renderJS(for:)`, but first tells the page where relative images
@@ -45,9 +60,10 @@ public enum MarkdownRenderBridge {
         for markdown: String,
         imageBase: String?,
         imageRootBase: String? = nil,
-        wikiLinks: [String: WikiLinkResolution]?
+        wikiLinks: [String: WikiLinkResolution]?,
+        scroll: RenderScroll = .keep
     ) -> String? {
-        guard let render = renderJS(for: markdown),
+        guard let render = renderJS(for: markdown, scroll: scroll),
               let base = stringOrNullLiteral(imageBase),
               let rootBase = stringOrNullLiteral(imageRootBase),
               let links = wikiLinksJSON(wikiLinks) else { return nil }

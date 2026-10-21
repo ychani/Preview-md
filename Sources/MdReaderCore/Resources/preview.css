@@ -456,8 +456,9 @@ span.wikilink { color: var(--link); }
 }
 
 /* ── Remote-images banner ───────────────────────────────────── */
-/* Sticky: render() keeps the previous scroll offset, so a document opened
-   from a scrolled one would otherwise start with the banner off-screen. */
+/* Sticky: re-rendering the same document keeps its scroll offset, so a
+   remote image added while scrolled down (Split view) would otherwise raise
+   a banner nobody sees. */
 .previewmd-remote-banner {
   position: sticky;
   top: 0;

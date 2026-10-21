@@ -158,6 +158,9 @@ struct MarkdownPreviewView: NSViewRepresentable {
         }
         private var lastInput: RenderInput?
         private var lastRendered: RenderKey?
+        /// Top of the page for a newly opened document; same place while the
+        /// same one re-renders (including across an opt-in shell reload).
+        private var scrollTracker = PreviewScrollTracker()
         /// Bumped per flush; a map computed off the main thread for an older
         /// flush is dropped.
         private var renderSequence = 0
@@ -299,9 +302,11 @@ struct MarkdownPreviewView: NSViewRepresentable {
             let key = RenderKey(markdown: input.markdown, bases: input.bases, wikiLinks: wikiLinks)
             var js = ""
             if key != lastRendered {
+                let scroll = scrollTracker.scroll(forRenderOf: input.documentURL)
                 guard let render = MarkdownRenderBridge.renderJS(
                         for: key.markdown, imageBase: key.bases?.imageBase,
-                        imageRootBase: key.bases?.rootBase, wikiLinks: key.wikiLinks) else { return }
+                        imageRootBase: key.bases?.rootBase, wikiLinks: key.wikiLinks,
+                        scroll: scroll) else { return }
                 js = render
                 lastRendered = key
             }
@@ -409,7 +414,11 @@ struct MarkdownPreviewView: NSViewRepresentable {
             case "loadRemoteImages":
                 guard !remoteImagesAllowed else { return }
                 remoteOptIn = currentScope(for: pendingMarkdown)
-                if !shellAllowsRemoteImages { loadShell() }
+                if !shellAllowsRemoteImages {
+                    let scrollY = ((message.body as? [String: Any])?["scrollY"] as? NSNumber)?.doubleValue
+                    scrollTracker.shellWillReload(document: documentURL, scrollY: scrollY)
+                    loadShell()
+                }
             default:
                 break
             }

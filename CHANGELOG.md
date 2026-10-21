@@ -84,8 +84,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ### Fixed
 - The "Load remote images" banner now appears for every blocked remote image —
   badges inside links or raw HTML blocks, `<picture>`/`srcset`, and CSS
-  `url()` — and stays pinned at the top, so it is visible even when a
-  document opens scrolled down.
+  `url()` — and stays pinned at the top while you scroll.
+- Opening a different file starts the preview at the top instead of at the
+  previous file's scroll position. Re-rendering the same file (typing in
+  Split view, a reload from disk, loading remote images) keeps your place.
 - PreviewMD now asks before discarding unsaved edits when you open another
   file or folder, and no longer switches files if saving fails.
 - Opening a Markdown file from Finder (or `open -a PreviewMD file.md`) while

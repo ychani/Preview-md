@@ -211,7 +211,8 @@ function updateRemoteBanner(hasRemote) {
     button.textContent = 'Load remote images';
     button.addEventListener('click', function () {
       button.disabled = true;
-      post('loadRemoteImages', true);
+      // The opt-in reloads the shell; the app restores this offset.
+      post('loadRemoteImages', { scrollY: window.scrollY || 0 });
     });
     remoteBanner.appendChild(label);
     remoteBanner.appendChild(button);
@@ -446,7 +447,11 @@ function extractTOC() {
 }
 
 // ── Render ────────────────────────────────────────────────────
-function render(md) {
+// options (from Swift, see MarkdownRenderBridge.renderJS(…, scroll:)):
+//   none                keep the current scroll offset (same document)
+//   { resetScroll: true } start at the top (a different document)
+//   { scrollY: <n> }    scroll to n (same document in a freshly loaded shell)
+function render(md, options) {
   if (!contentEl) return;
   var scrollY = window.scrollY;
   renderGeneration++;
@@ -478,6 +483,12 @@ function render(md) {
   runMermaid();
   extractTOC();
 
+  if (options && options.resetScroll === true) {
+    scrollY = 0;
+  } else if (options && typeof options.scrollY === 'number' &&
+             isFinite(options.scrollY) && options.scrollY >= 0) {
+    scrollY = options.scrollY;
+  }
   window.scrollTo(0, scrollY);
 }
 

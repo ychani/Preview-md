@@ -95,6 +95,11 @@ final class RemoteImageBannerWebViewTests: XCTestCase {
     private var harness: Harness!
     private var webView: WKWebView!
 
+    /// Generous: a cold web content process on a CI runner can be slow.
+    private let timeout: TimeInterval = 60
+
+    /// An offscreen web view (never put in a window) with the strict shell,
+    /// then optionally the remote-images variant.
     private func loadShell(allowRemoteImages: Bool = false) throws {
         let htmlURL = try XCTUnwrap(MdReaderResources.previewHTMLURL)
         harness = Harness()
@@ -109,15 +114,19 @@ final class RemoteImageBannerWebViewTests: XCTestCase {
         let loaded = expectation(description: "shell loaded")
         harness.loaded = loaded
         webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
-        wait(for: [loaded], timeout: 30)
-        guard allowRemoteImages else { return }
+        wait(for: [loaded], timeout: timeout)
+        if allowRemoteImages { try loadOptInShell() }
+    }
+
+    private func loadOptInShell() throws {
+        let htmlURL = try XCTUnwrap(MdReaderResources.previewHTMLURL)
         let template = try String(contentsOf: htmlURL, encoding: .utf8)
         let html = try XCTUnwrap(MarkdownRenderBridge.previewShellHTML(
             template: template, allowRemoteImages: true))
         let reloaded = expectation(description: "opt-in shell loaded")
         harness.loaded = reloaded
         webView.loadHTMLString(html, baseURL: htmlURL)
-        wait(for: [reloaded], timeout: 30)
+        wait(for: [reloaded], timeout: timeout)
     }
 
     override func tearDown() {
@@ -136,26 +145,35 @@ final class RemoteImageBannerWebViewTests: XCTestCase {
             failure = error
             done.fulfill()
         }
-        wait(for: [done], timeout: 30)
+        wait(for: [done], timeout: timeout)
         if let failure { throw failure }
         return value
     }
 
-    /// Renders `markdown` and returns (remote image count, banner visible).
-    private func render(_ markdown: String) throws -> (count: Int, banner: Bool) {
-        let js = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: markdown))
+    /// Renders `markdown` and returns the remote image count, whether the
+    /// banner is visible, and the scroll offset afterwards.
+    @discardableResult
+    private func render(
+        _ markdown: String, scroll: RenderScroll = .keep
+    ) throws -> (count: Int, banner: Bool, scrollY: Double) {
+        let js = try XCTUnwrap(MarkdownRenderBridge.renderJS(for: markdown, scroll: scroll))
         let probe = """
             \(js);
             JSON.stringify({
               count: countRemoteImages(document.getElementById('previewmd-root')),
-              banner: !!document.querySelector('.previewmd-remote-banner:not([hidden])')
+              banner: !!document.querySelector('.previewmd-remote-banner:not([hidden])'),
+              scrollY: window.scrollY
             })
             """
         let json = try XCTUnwrap(try evaluate(probe) as? String)
         let object = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        return (try XCTUnwrap(object["count"] as? Int), try XCTUnwrap(object["banner"] as? Bool))
+        return (try XCTUnwrap(object["count"] as? Int),
+                try XCTUnwrap(object["banner"] as? Bool),
+                try XCTUnwrap(object["scrollY"] as? Double))
     }
+
+    private static let longText = (1...200).map { "Paragraph \($0)." }.joined(separator: "\n\n")
 
     private static let readmeBadges = """
         <div align="center">
@@ -194,30 +212,59 @@ final class RemoteImageBannerWebViewTests: XCTestCase {
         XCTAssertFalse(try render("plain text").banner)
     }
 
-    /// render() keeps the scroll offset, so a document opened from a
-    /// scrolled one starts scrolled: the banner must still be on screen.
+    /// Re-rendering the same document keeps its scroll offset (e.g. a remote
+    /// image typed in Split view while scrolled down): the banner must still
+    /// be on screen.
     func testBannerVisibleWhenRenderedScrolledDown() throws {
         try loadShell()
-        let filler = (1...200).map { "Paragraph \($0)." }.joined(separator: "\n\n")
-        _ = try render(filler)
+        try render(Self.longText)
         _ = try evaluate("window.scrollTo(0, 3000); 0")
-        XCTAssertTrue(try render(Self.readmeBadges + "\n\n" + filler).banner)
-        let top = try XCTUnwrap(try evaluate("""
-            window.scrollY > 0
-              ? document.querySelector('.previewmd-remote-banner').getBoundingClientRect().top
-              : -1
-            """) as? Double)
+        let result = try render(Self.longText + "\n\n![x](https://e.com/x.png)")
+        XCTAssertTrue(result.banner)
+        XCTAssertEqual(result.scrollY, 3000, accuracy: 1)
+        let top = try XCTUnwrap(try evaluate(
+            "document.querySelector('.previewmd-remote-banner').getBoundingClientRect().top") as? Double)
         XCTAssertEqual(top, 0, accuracy: 1)
     }
 
-    func testButtonRequestsOptIn() throws {
+    // MARK: Scroll position across renders
+
+    func testSameDocumentKeepsScrollNewDocumentStartsAtTop() throws {
         try loadShell()
-        XCTAssertTrue(try render(Self.readmeBadges).banner)
+        try render(Self.longText, scroll: .top)
+        _ = try evaluate("window.scrollTo(0, 3000); 0")
+        // Same document re-rendered (typing, reload from disk).
+        XCTAssertEqual(try render(Self.longText + "\n\nmore", scroll: .keep).scrollY, 3000, accuracy: 1)
+        // A different document.
+        XCTAssertEqual(try render(Self.readmeBadges + "\n\n" + Self.longText, scroll: .top).scrollY, 0)
+    }
+
+    func testOptInReloadRestoresScroll() throws {
+        try loadShell()
+        let doc = Self.readmeBadges + "\n\n" + Self.longText
+        try render(doc, scroll: .top)
+        _ = try evaluate("window.scrollTo(0, 2000); 0")
         let posted = expectation(description: "loadRemoteImages posted")
         harness.posted = posted
         _ = try evaluate("document.querySelector('.previewmd-remote-banner button').click(); 0")
-        wait(for: [posted], timeout: 30)
-        XCTAssertEqual(harness.postedBodies.first as? Bool, true)
+        wait(for: [posted], timeout: timeout)
+        let body = try XCTUnwrap(harness.postedBodies.first as? [String: Any])
+        let scrollY = try XCTUnwrap((body["scrollY"] as? NSNumber)?.doubleValue)
+        XCTAssertEqual(scrollY, 2000, accuracy: 1)
+
+        // What the app does: reload the opt-in shell, then render the same
+        // document with the offset the tracker hands back.
+        var tracker = PreviewScrollTracker()
+        let url = URL(fileURLWithPath: "/notes/README.md")
+        _ = tracker.scroll(forRenderOf: url)
+        tracker.shellWillReload(document: url, scrollY: scrollY)
+        try loadOptInShell()
+        XCTAssertEqual(try evaluate("window.scrollY") as? Double, 0)
+        let scroll = tracker.scroll(forRenderOf: url)
+        XCTAssertEqual(scroll, .restore(scrollY))
+        let result = try render(doc, scroll: scroll)
+        XCTAssertFalse(result.banner)
+        XCTAssertEqual(result.scrollY, 2000, accuracy: 1)
     }
 
     func testNoBannerOnceRemoteImagesAreAllowed() throws {
