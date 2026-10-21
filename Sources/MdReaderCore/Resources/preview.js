@@ -490,6 +490,9 @@ function render(md, options) {
     scrollY = options.scrollY;
   }
   window.scrollTo(0, scrollY);
+  // read-aloud.js re-maps its highlights onto the new content. An event
+  // rather than a hook global: a lazy window lookup could be clobbered.
+  try { document.dispatchEvent(new CustomEvent('previewmd:rendered')); } catch (e) {}
 }
 
 window.render = render;
