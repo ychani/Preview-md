@@ -266,11 +266,19 @@ var PreviewMDExtensions = (function () {
     // in a document cannot opt its own <img> into root-relative resolution.
     // Without a map, fall back to a document-relative src (the normal
     // relative-image path).
+    //
+    // Static mode (Quick Look) has no map: the embed becomes a
+    // document-relative <img> marked data-previewmd-embed, which
+    // LocalImageInliner (Swift) resolves in the document's folder, then its
+    // attachments/, assets/ and images/ subfolders, and inlines as cid:.
     function renderEmbed(link) {
       var alt = link.alias && !SIZE_ALIAS.test(link.alias) ? link.alias : basename(link.target);
-      if (mode !== 'app') return '<span class="wikilink">' + escapeHTML(displayText(link)) + '</span>';
       var size = link.alias ? SIZE_ALIAS.exec(link.alias) : null;
       var dims = size ? ' width="' + size[1] + '"' + (size[2] ? ' height="' + size[2] + '"' : '') : '';
+      if (mode !== 'app') {
+        return '<img src="' + escapeHTML(encodePath(link.target)) + '" alt="' + escapeHTML(alt) + '"' +
+          dims + ' data-previewmd-embed="">';
+      }
       var r = resolveTarget(link.target);
       if (r === null || (r && r.kind !== 'image')) {
         return '<span class="wikilink-missing-image" title="Image not found">' +

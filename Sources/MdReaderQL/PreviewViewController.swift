@@ -35,12 +35,23 @@ public final class PreviewViewController: NSViewController, QLPreviewingControll
         qlLog.info("providePreview: \(url.lastPathComponent, privacy: .public)")
 
         let html: String
+        var images: [String: InlinedImage] = [:]
         do {
             let (document, isTruncated) = try MarkdownDocumentIO.readPrefix(
                 from: url, maxBytes: Self.maxPreviewBytes)
             let markdown = isTruncated ? Self.truncationBanner + document.text : document.text
-            html = try MarkdownHTMLRenderer.renderDocument(
-                markdown: markdown, title: url.lastPathComponent)
+            // Relative images from the file's folder (and its subfolders)
+            // become cid: attachments; LocalImageInliner enforces the policy.
+            let rendered = try MarkdownHTMLRenderer.renderDocument(
+                markdown: markdown, title: url.lastPathComponent,
+                imageFolder: url.deletingLastPathComponent())
+            html = rendered.html
+            images = rendered.attachments
+            let bytes = rendered.attachments.values.reduce(0) { $0 + $1.data.count }
+            qlLog.info("""
+                providePreview: \(rendered.attachments.count) local images (\(bytes) bytes), \
+                \(rendered.skipped) over budget, \(rendered.refused) refused
+                """)
         } catch {
             // Show the reason instead of a blank/failed preview.
             qlLog.error("preview failed: \(error.localizedDescription, privacy: .public)")
@@ -55,6 +66,9 @@ public final class PreviewViewController: NSViewController, QLPreviewingControll
         ) { reply in
             reply.title = url.lastPathComponent
             reply.stringEncoding = .utf8
+            reply.attachments = images.mapValues {
+                QLPreviewReplyAttachment(data: $0.data, contentType: $0.contentType)
+            }
             return data
         }
     }
