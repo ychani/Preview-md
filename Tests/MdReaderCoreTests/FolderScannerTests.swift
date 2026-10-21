@@ -89,6 +89,35 @@ final class FolderScannerTests: XCTestCase {
         XCTAssertEqual(paths, ["outside/", "outside/linked.md", "keep.md"])
     }
 
+    func testPackageExtensionSkippedWithoutSystemPackageRegistration() throws {
+        // No installed app declares `.zzpkgtest` a package, so only the
+        // built-in extension list can skip it — the clean-CI-runner case.
+        try touch("keep.md")
+        try touch("Doc.ZZPkgTest/text.md")
+        try touch("Doc.ZZPkgTest/assets/a.png")
+        try touch("real/Inner.zzpkgtest/b.md")
+        try FileManager.default.createSymbolicLink(
+            at: root.appendingPathComponent("alias"),
+            withDestinationURL: root.appendingPathComponent("real/Inner.zzpkgtest"))
+
+        var options = FolderScanOptions()
+        options.followSymlinkedDirectories = true
+        options.packageExtensions = []
+        XCTAssertEqual(outline(FolderScanner.scan(root, options: options).root), [
+            "alias/", "alias/b.md", "Doc.ZZPkgTest/", "Doc.ZZPkgTest/text.md",
+            "real/", "real/Inner.zzpkgtest/", "real/Inner.zzpkgtest/b.md", "keep.md",
+        ])
+
+        options.packageExtensions = ["ZZPkgTest"]
+        let result = FolderScanner.scan(root, options: options)
+        XCTAssertEqual(outline(result.root), ["keep.md"])
+        XCTAssertEqual(result.assetFiles, [])
+        XCTAssertEqual(FolderScanner.rescan(
+            directory: root.appendingPathComponent("Doc.ZZPkgTest"), root: root,
+            options: options), [])
+        XCTAssertTrue(FolderScanOptions.defaultPackageExtensions.contains("textbundle"))
+    }
+
     func testSymlinkedDirectoryFollowedWhenAskedWithoutLooping() throws {
         try touch("real/a.md")
         try FileManager.default.createSymbolicLink(

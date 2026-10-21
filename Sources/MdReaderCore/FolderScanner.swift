@@ -25,6 +25,24 @@ public struct FolderScanOptions: Equatable, Sendable {
     /// Most asset files a scan collects (`assetsTruncated`). Independent of
     /// `maxFiles`.
     public var maxAssetFiles: Int
+    /// Lowercased extensions of directories treated as opaque documents
+    /// (packages) and never descended into, in addition to whatever the
+    /// system reports via `URLResourceKey.isPackageKey`. The system check only
+    /// knows a type is a package if some installed app declares it, so this
+    /// list keeps the scan the same on every Mac (e.g. a clean CI runner
+    /// without a TextBundle-aware editor).
+    public var packageExtensions: Set<String> {
+        didSet { packageExtensions = Set(packageExtensions.map { $0.lowercased() }) }
+    }
+
+    /// Document-package directory types skipped by default, regardless of
+    /// which apps are installed.
+    public static let defaultPackageExtensions: Set<String> = [
+        "textbundle", "rtfd", "pages", "key", "numbers",
+        "app", "appex", "bundle", "framework", "plugin", "kext",
+        "xcodeproj", "xcworkspace", "playground", "xcarchive",
+        "photoslibrary", "musiclibrary",
+    ]
 
     /// Image types collected as assets by default.
     public static let defaultAssetExtensions: Set<String> = [
@@ -40,7 +58,8 @@ public struct FolderScanOptions: Equatable, Sendable {
         maxDepth: Int = 16,
         maxFiles: Int = 20_000,
         assetExtensions: Set<String> = FolderScanOptions.defaultAssetExtensions,
-        maxAssetFiles: Int = 20_000
+        maxAssetFiles: Int = 20_000,
+        packageExtensions: Set<String> = FolderScanOptions.defaultPackageExtensions
     ) {
         self.extensions = Set(extensions.map { $0.lowercased() })
         self.ignoredDirectoryNames = ignoredDirectoryNames
@@ -50,12 +69,18 @@ public struct FolderScanOptions: Equatable, Sendable {
         self.maxFiles = maxFiles
         self.assetExtensions = Set(assetExtensions.map { $0.lowercased() })
         self.maxAssetFiles = maxAssetFiles
+        self.packageExtensions = Set(packageExtensions.map { $0.lowercased() })
     }
 
     public static let `default` = FolderScanOptions()
 
     func isMarkdownName(_ name: String) -> Bool {
         extensions.contains((name as NSString).pathExtension.lowercased())
+    }
+
+    func isPackageName(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension.lowercased()
+        return !ext.isEmpty && packageExtensions.contains(ext)
     }
 
     func isAssetName(_ name: String) -> Bool {
@@ -183,8 +208,11 @@ public enum FolderScanner {
             let name: String
             let isDirectory: Bool
             let isSymlink: Bool
+            /// The system's package flag (depends on installed apps).
             let isPackage: Bool
             let isHidden: Bool
+            /// Name of the link target for a symlink, else `name`.
+            let targetName: String
         }
 
         init(options: FolderScanOptions, budget: Int, assetBudget: Int? = nil) {
@@ -208,6 +236,7 @@ public enum FolderScanner {
             let isSymlink = values.isSymbolicLink ?? false
             var isDirectory = values.isDirectory ?? false
             var isPackage = values.isPackage ?? false
+            var targetName = url.lastPathComponent
             if isSymlink {
                 // realpath fails for a dangling link; drop those.
                 guard let real = realPath(url),
@@ -215,14 +244,18 @@ public enum FolderScanner {
                         forKeys: [.isDirectoryKey, .isPackageKey]) else { return nil }
                 isDirectory = targetValues.isDirectory ?? false
                 isPackage = targetValues.isPackage ?? false
+                targetName = (real as NSString).lastPathComponent
             }
             return Entry(url: url, name: url.lastPathComponent, isDirectory: isDirectory,
                          isSymlink: isSymlink, isPackage: isPackage,
-                         isHidden: values.isHidden ?? url.lastPathComponent.hasPrefix("."))
+                         isHidden: values.isHidden ?? url.lastPathComponent.hasPrefix("."),
+                         targetName: targetName)
         }
 
         func shouldDescend(_ entry: Entry) -> Bool {
-            guard entry.isDirectory, !entry.isPackage else { return false }
+            guard entry.isDirectory, !entry.isPackage,
+                  !options.isPackageName(entry.name),
+                  !options.isPackageName(entry.targetName) else { return false }
             if options.skipHidden && (entry.isHidden || entry.name.hasPrefix(".")) { return false }
             if options.ignoredDirectoryNames.contains(entry.name) { return false }
             if entry.isSymlink {
