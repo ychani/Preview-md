@@ -324,6 +324,73 @@ var PreviewMDExtensions = (function () {
     });
   }
 
+  // ── Remote images ───────────────────────────────────────────
+  // How many https: image loads one element of the final, sanitized preview
+  // DOM would make: exactly what the app's strict CSP blocks and the
+  // "Load remote images" opt-in (img-src … https:) unblocks. preview.js runs
+  // it over every element after rendering, so images nested in links, inside
+  // raw HTML blocks, in <picture>, or in inline styles are all seen no matter
+  // which marked token produced them. DOM-free so it runs in JavaScriptCore
+  // for tests: `getAttribute(name)` returns the attribute value or null.
+  //
+  // Only https: counts — the opt-in never allows http:, so a banner for an
+  // http:-only document would offer a button that loads nothing.
+  var IMAGE_URL_ATTRS_BY_TAG = {
+    img: ['src', 'srcset'],
+    source: ['srcset'],          // <picture><source srcset>
+    input: ['src'],              // <input type="image">
+    video: ['poster'],
+    image: ['href', 'xlink:href'],   // SVG <image>
+    feimage: ['href', 'xlink:href']  // SVG <feImage>
+  };
+
+  // URL parsers drop tabs and newlines anywhere and leading C0/space
+  // characters, so ` https:` and `ht\ttps:` still load remotely.
+  function normalizeURL(v) {
+    return String(v).replace(/[\t\n\r]/g, '').replace(/^[\u0000- ]+/, '');
+  }
+
+  function isRemoteURL(v) {
+    return /^https:/i.test(normalizeURL(v));
+  }
+
+  // srcset: comma-separated `url [descriptor]` candidates.
+  function srcsetHasRemote(v) {
+    return /(?:^|,)\s*https:/i.test(String(v).replace(/[\t\n\r]/g, ' '));
+  }
+
+  // Inline style: url(https:…) or a quoted https: string (image-set()),
+  // after undoing CSS escapes such as `url(\68ttps://…)`.
+  function cssUnescape(s) {
+    return String(s).replace(/\\([0-9a-fA-F]{1,6})[ \t\n\r\f]?|\\([^\n\r\f0-9a-fA-F])/g,
+      function (_, hex, ch) {
+        if (ch !== undefined) return ch;
+        var cp = parseInt(hex, 16);
+        return cp > 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : '�';
+      });
+  }
+
+  function styleHasRemote(v) {
+    return /(?:url\(\s*['"]?|['"])\s*https:/i.test(cssUnescape(v).replace(/[\t\n\r]/g, ''));
+  }
+
+  function remoteImageRefCount(tagName, getAttribute) {
+    var count = 0;
+    var tag = String(tagName || '').toLowerCase();
+    var attrs = IMAGE_URL_ATTRS_BY_TAG[tag] || [];
+    for (var i = 0; i < attrs.length; i++) {
+      var v = getAttribute(attrs[i]);
+      if (v == null) continue;
+      if (attrs[i] === 'srcset' ? srcsetHasRemote(v) : isRemoteURL(v)) count++;
+    }
+    // Legacy background attribute (<body>/<table>/<td>) and inline styles.
+    var bg = getAttribute('background');
+    if (bg != null && isRemoteURL(bg)) count++;
+    var style = getAttribute('style');
+    if (style != null && styleHasRemote(style)) count++;
+    return count;
+  }
+
   function install(marked, options) {
     options = options || {};
     if (!marked || typeof marked.use !== 'function') return false;
@@ -336,6 +403,7 @@ var PreviewMDExtensions = (function () {
 
   return {
     install: install,
+    remoteImageRefCount: remoteImageRefCount,
     // Exposed for tests.
     _parseFrontMatter: parseFrontMatter,
     _parseWikiLink: parseWikiLink,

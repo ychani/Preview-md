@@ -82,6 +82,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
   monotonically increasing build number (commit count).
 
 ### Fixed
+- The "Load remote images" banner now appears for every blocked remote image —
+  badges inside links or raw HTML blocks, `<picture>`/`srcset`, and CSS
+  `url()` — and stays pinned at the top, so it is visible even when a
+  document opens scrolled down.
 - PreviewMD now asks before discarding unsaved edits when you open another
   file or folder, and no longer switches files if saving fails.
 - Opening a Markdown file from Finder (or `open -a PreviewMD file.md`) while
