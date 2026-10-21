@@ -298,6 +298,28 @@ final class MarkdownHTMLRendererTests: XCTestCase {
         XCTAssertTrue(html.contains("<td><span class=\"wikilink\">b</span></td>"), html)
     }
 
+    // MARK: - Code block language label
+
+    func testCodeBlockLabelIsPlainLanguageName() throws {
+        let html = try MarkdownHTMLRenderer.renderBody(
+            markdown: "```mermaid\ngraph TD; A-->B\n```\n\n```swift\nlet x = 1\n```\n\n```\nplain\n```")
+        // Label attribute carries just the name; the code class is unchanged.
+        XCTAssertTrue(html.contains("<pre data-lang=\"mermaid\"><code class=\"language-mermaid\">"), html)
+        XCTAssertTrue(html.contains("<pre data-lang=\"swift\"><code class=\"language-swift\">"), html)
+        XCTAssertFalse(html.contains("data-lang=\"language-"), html)
+        // Mermaid source stays visible in Quick Look (no JS to render it).
+        XCTAssertTrue(html.contains("graph TD; A--&gt;B"), html)
+        // Unlabeled fence: no label.
+        XCTAssertTrue(html.contains("<pre><code>plain"), html)
+        XCTAssertEqual(html.components(separatedBy: "data-lang=").count - 1, 2, html)
+    }
+
+    func testCodeBlockLabelCSSUsesDataLangNotClass() throws {
+        let doc = try MarkdownHTMLRenderer.renderDocument(markdown: "```swift\nx\n```")
+        XCTAssertTrue(doc.contains("content: attr(data-lang)"), "label must come from data-lang")
+        XCTAssertFalse(doc.contains("content: attr(class)"), "class-based label shows LANGUAGE-…")
+    }
+
     func testRenderDocumentIncludesExtensionStyles() throws {
         let doc = try MarkdownHTMLRenderer.renderDocument(markdown: "[[a]]")
         XCTAssertTrue(doc.contains(".front-matter"), "preview.css front-matter styles not inlined")
@@ -334,6 +356,11 @@ final class MarkdownHTMLRendererTests: XCTestCase {
         let out = ctx.evaluateScript("marked.parse(__md)")?.toString() ?? ""
         XCTAssertNil(error)
         return out
+    }
+
+    func testAppModeCodeBlockLabel() throws {
+        let html = try renderAppMode("```swift\nx\n```", map: nil)
+        XCTAssertTrue(html.contains("<pre data-lang=\"swift\"><code class=\"language-swift\">"), html)
     }
 
     func testAppModeWikiLinkStates() throws {
