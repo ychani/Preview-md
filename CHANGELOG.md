@@ -45,8 +45,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - **Image embeds** — `![[image.png]]`, with optional `|width` or
   `|widthxheight` sizes, load from anywhere in the same workspace root,
   including image-only folders such as `attachments/`. Note embeds
-  `![[note]]` render as links. Quick Look shows wikilinks and embeds as
-  styled text without navigation.
+  `![[note]]` render as links. Quick Look shows wikilinks as styled text
+  without navigation.
+- **Local images in Quick Look** — relative images (`./img/pic.png`,
+  `sub/diagram.svg`, raw HTML `<img>`) and `![[image.png]]` embeds (looked
+  up next to the file, then in its `attachments/`, `assets/` and `images/`
+  folders) now show in Quick Look previews. Only images in the previewed
+  file's folder and its subfolders are read — no `../`, no symlink escapes,
+  and the file must really be an image. Up to 64 images, 4 MB each and 16 MB
+  in total; larger ones show their alt text.
 - **Local images and links** — relative images (`./img/pic.png`,
   `../attachments/pic.png`) load as long as they stay inside the workspace
   root (or the document's folder); `[x](#heading)` links scroll within the
@@ -123,6 +130,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - Quick Look CSP spells out `script-src 'none'` and adds `base-uri` /
   `form-action 'none'`; its fallback sanitizer is hardened against split
   tags and obfuscated `javascript:` URLs.
+- **Quick Look now really blocks remote images.** Its renderer was found
+  loading `https:` images despite the preview's CSP; previews now drop every
+  image, media and CSS `url()` reference that isn't an inlined local image,
+  so a previewed file can't trigger network requests (tracking pixels).
+- The Quick Look extension carries a read-only sandbox exception
+  (`com.apple.security.temporary-exception.files.absolute-path.read-only`
+  = `/`) so it can read images next to the previewed file — Quick Look only
+  grants access to the file itself. The extension's own path policy (the
+  file's folder and subfolders, symlinks resolved, image content verified)
+  limits what is actually read. Same approach as QLMarkdown.
 - Updated the bundled HTML sanitizer (DOMPurify 3.4.17) and diagram renderer
   (Mermaid 11.16.1) to fix known vulnerabilities.
 
