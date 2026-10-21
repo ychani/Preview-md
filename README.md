@@ -7,17 +7,45 @@ A free, native macOS Markdown reader with a Quick Look extension — open a `.md
 
 ## Features
 
+**Reading & editing**
+
 - **Preview, Split, and Edit views** (⌘1 / ⌘2 / ⌘3) with GitHub-style rendering and automatic light/dark mode
-- **Open files or folders** — double-click a `.md` / `.markdown` file, drop one on the Dock icon or window, or ⌘O; File → Open Recent
-- **Folder sidebar** — a folder's Markdown files are one click away; the last folder is remembered
-- **Auto-reload** — the preview follows changes made by another app (edit in your editor, read here)
-- **Mermaid diagrams** — ```` ```mermaid ```` blocks render as diagrams in the app
-- **Table of contents** panel and **Find** (⌘F, ⌘G / ⇧⌘G)
-- **Safe rendering** — HTML is sanitized with DOMPurify and fails closed to plain text if the sanitizer is unavailable
-- **Data-loss guards** — prompts before switching files or quitting with unsaved edits, and before overwriting a file that changed on disk
-- **Encoding aware** — UTF-8, UTF-16, Latin-1/CP-1252, and Shift-JIS files open correctly and save back in their original encoding
-- **Quick Look** — press Space on a Markdown file in Finder. Previews are rendered statically (marked via JavaScriptCore, no JavaScript in the preview, no Mermaid) and cannot load remote content
-- Universal app (Apple silicon and Intel), macOS 13 Ventura or later
+- **Open files or folders** — double-click a `.md` / `.markdown` file, drop files on the Dock icon or window, or ⌘O (select several at once); File → Open Recent
+- **Auto-reload** — the preview follows changes made by another app; if you have unsaved edits, PreviewMD asks before reloading
+- **Mermaid diagrams**, **table of contents** panel, and **Find** (⌘F, ⌘G / ⇧⌘G)
+- **Links and images** — `#heading` links scroll in place, links to other `.md` files open them, and relative images (`./img/pic.png`) load from disk
+- **Zoom** the preview and editor (⌘+ / ⌘− / ⌘0)
+- **Window title** shows the file name with a proxy icon (⌘-click for the path menu); the subtitle shows its folder. File → Reveal in Finder, Copy Path, Copy Relative Path
+- **Data-loss guards** — prompts before switching files, opening another file or folder, or quitting with unsaved edits, and before overwriting a file that changed on disk
+- **Encoding aware** — UTF-8, UTF-16, Latin-1/CP-1252, and Shift-JIS files open correctly and save back with their original encoding, byte-order mark, and line endings
+- **Large files** — files over 5 MB open read-only
+- VoiceOver labels for toolbar, sidebar, Find bar, and table-of-contents controls
+
+**Explorer & workspace**
+
+- **Folder tree** — open a folder to browse every Markdown file in its subfolders, VS Code style: folders first, Finder order; hidden folders and `node_modules` are skipped; up to 20,000 files (a notice says when the list is capped)
+- **Live updates** — new, deleted, and renamed files appear within about a second; expanded folders and the selection are kept, and the selected file is revealed in the tree
+- **Context menu** — Reveal in Finder, Copy Path, Copy Relative Path; every row shows its full path as a tooltip
+- **Multi-root workspace** — File → Add Folder to Workspace… (⌥⌘O) or the sidebar's ＋ menu adds a folder as another top-level root; remove one with Remove Folder from Workspace (nothing is deleted on disk). Nested or duplicate folders are refused with a notice. Opening a folder replaces the workspace; the workspace is restored on the next launch
+- **Opened-files list** — individually opened files show their parent folder, so two `README.md` files can be told apart
+
+**Obsidian-friendly**
+
+- **Front matter** — a leading YAML block renders as a compact properties table (a leading `---` horizontal rule still works)
+- **Wikilinks** — `[[note]]`, `[[note|alias]]`, `[[note#heading]]`, `[[folder/note]]` resolve across the open workspace like Obsidian (case-insensitive; an exact path wins, then the note's own folder, then the shortest path). Links to missing notes are dimmed; clicking a link opens the note and scrolls to the heading
+- **Image embeds** — `![[image.png]]`, with optional `|300` or `|300x200` size, load from anywhere inside the same workspace folder (including image-only folders such as `attachments/`); note embeds `![[note]]` show as links
+
+**Quick Look**
+
+- Press Space on a Markdown file in Finder. Previews are rendered statically (marked via JavaScriptCore, no JavaScript in the preview, no Mermaid), include front-matter tables, and show wikilinks as styled text without navigation. Files over 2 MB are truncated with a notice
+
+**Privacy**
+
+- **Remote images are blocked** — a document that references them shows a "Load remote images" banner; the choice applies to that document only and is not saved
+- **Safe rendering** — HTML is sanitized with DOMPurify under a strict Content-Security-Policy, and fails closed to plain text if the sanitizer is unavailable
+- Local images load only from inside the document's workspace folder (or its own folder when opened on its own), and only image files
+
+Universal app (Apple silicon and Intel), macOS 13 Ventura or later.
 
 ## Install
 
@@ -67,10 +95,15 @@ PreviewMD has no analytics, telemetry, accounts, or update checks, and makes no 
 | Shortcut | Action |
 |----------|--------|
 | ⌘O | Open file or folder… |
+| ⌥⌘O | Add Folder to Workspace… |
 | ⌘S | Save |
+| ⌘1 / ⌘2 / ⌘3 | Preview / Split / Edit |
 | ⌘F | Find in preview |
 | ⌘G / ⇧⌘G | Next / previous match |
-| ⌘1 / ⌘2 / ⌘3 | Preview / Split / Edit |
+| ⌘+ / ⌘− / ⌘0 | Zoom in / zoom out / actual size |
+| ⌥⌘R | Reveal in Finder |
+| ⌥⌘C | Copy Path |
+| ⇧⌥⌘C | Copy Relative Path (file inside the workspace) |
 
 ## Build from source
 
@@ -109,12 +142,28 @@ The version comes from `CFBundleShortVersionString` in `packaging/Info.plist`. I
 Package.swift                 SPM manifest: MdReaderCore, MdReader (PreviewMD), MdReaderQL (PreviewMD-QL)
 Sources/
   MdReaderCore/               shared library
-    MarkdownDocumentIO.swift      encoding-aware reading/writing
-    MarkdownRenderBridge.swift    safe JS call builder for the WebView
+    MarkdownDocumentIO.swift      encoding-, BOM- and line-ending-aware reading/writing
+    MarkdownRenderBridge.swift    safe JS call builder for the WebView, CSP, local image/link resolution
     MarkdownHTMLRenderer.swift    static HTML rendering via JavaScriptCore (Quick Look)
+    FileWatcher.swift             watches the open file (survives atomic saves)
+    FileNode.swift                explorer tree node, Finder-style sort
+    FilePathDisplay.swift         relative paths, tooltips, duplicate-name labels
+    FolderScanner.swift           metadata-only recursive folder scan (Markdown + images)
+    FolderTree.swift              explorer model with in-place subtree refresh
+    FolderWatcher.swift           FSEvents watcher for live folder updates
+    Workspace.swift               multi-root workspace roots and their bookmarks
+    WikiLink.swift                wikilink parsing and workspace-wide resolution
     MdReaderCore.swift            resource-bundle lookup
-    Resources/                    marked, DOMPurify, Mermaid, preview.html/.css, third-party notices
-  MdReader/                   the app (SwiftUI + WKWebView): state, views, sidebar, TOC, find bar
+    Resources/                    marked, DOMPurify, Mermaid, markdown-extensions.js (front matter,
+                                  wikilinks), preview.html/.js/.css, third-party notices
+  MdReader/                   the app (SwiftUI + WKWebView)
+    AppState.swift                documents, workspace, watchers, wikilink index
+    SidebarView.swift             folder tree and opened-files list
+    MarkdownPreviewView.swift     preview WebView
+    LocalImageSchemeHandler.swift serves local images to the preview (previewmd-local: scheme)
+    FileLocationActions.swift     Reveal in Finder / Copy Path / Copy Relative Path
+    PreviewSettings.swift         preview and editor zoom
+    …                             editor, find bar, TOC, menus
   MdReaderQL/                 Quick Look extension (QLPreviewingController)
 Tests/MdReaderCoreTests/      unit tests
 packaging/                    Info.plists, Quick Look entitlements, app icon, Homebrew cask
