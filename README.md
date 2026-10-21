@@ -18,7 +18,6 @@
 </div>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
   <img src="docs/images/hero-light.png" alt="PreviewMD window with a folder of Markdown notes in the sidebar and a rendered document" width="900">
 </picture>
 
