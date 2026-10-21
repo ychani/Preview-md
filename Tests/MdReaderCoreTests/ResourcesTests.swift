@@ -22,6 +22,8 @@ final class ResourcesTests: XCTestCase {
             ("purify.min", "js"),
             ("markdown-extensions", "js"),
             ("mermaid.min", "js"),
+            ("read-aloud-core", "js"),
+            ("read-aloud", "js"),
             ("THIRD_PARTY_NOTICES", "md"),
         ]
         for (name, ext) in resources {
@@ -40,6 +42,18 @@ final class ResourcesTests: XCTestCase {
         let ext = try XCTUnwrap(html.range(of: "<script src=\"markdown-extensions.js\"></script>"))
         let shell = try XCTUnwrap(html.range(of: "<script src=\"preview.js\"></script>"))
         XCTAssertLessThan(ext.lowerBound, shell.lowerBound)
+    }
+
+    /// read-aloud.js captures PreviewMDReadAloudCore at load and listens for
+    /// preview.js's render event, so it loads last.
+    func testPreviewHTMLLoadsReadAloudAfterPreviewJS() throws {
+        let url = try XCTUnwrap(MdReaderResources.previewHTMLURL)
+        let html = try String(contentsOf: url, encoding: .utf8)
+        let shell = try XCTUnwrap(html.range(of: "<script src=\"preview.js\"></script>"))
+        let core = try XCTUnwrap(html.range(of: "<script src=\"read-aloud-core.js\"></script>"))
+        let readAloud = try XCTUnwrap(html.range(of: "<script src=\"read-aloud.js\"></script>"))
+        XCTAssertLessThan(shell.lowerBound, core.lowerBound)
+        XCTAssertLessThan(core.lowerBound, readAloud.lowerBound)
     }
 
     func testMissingResourceReturnsNil() {
