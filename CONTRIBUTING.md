@@ -46,6 +46,7 @@ Sources/
     MarkdownDocumentIO.swift      encoding-, BOM- and line-ending-aware reading/writing
     MarkdownRenderBridge.swift    safe JS call builder for the WebView, CSP, local image/link resolution
     MarkdownHTMLRenderer.swift    static HTML rendering via JavaScriptCore (Quick Look)
+    LocalImageInliner.swift       inlines local images into Quick Look previews (same path policy)
     FileWatcher.swift             watches the open file (survives atomic saves)
     FileNode.swift                explorer tree node, Finder-style sort
     FilePathDisplay.swift         relative paths, tooltips, duplicate-name labels
