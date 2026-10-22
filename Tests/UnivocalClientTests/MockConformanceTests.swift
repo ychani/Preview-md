@@ -19,13 +19,22 @@ final class MockConformanceTests: UnivocalTestCase {
         var options = ConformanceOptions(directory: dir)
         options.autograntExpected = true
         options.eventTimeout = 5
+        // S37/S43: the probe runs in this process, so it resolves to a frontmost "app" with our pid.
+        options.hotkeyPressTimeout = 5
+        options.hotkeyTrigger = {
+            Task {
+                await mock.setFrontmost(MockFrontmost(pid: getpid(), bundleId: "dev.univocal.conformance-probe"))
+                _ = await mock.simulateHotkey()
+            }
+        }
         let results = await MockConformance.run(options)
         XCTAssertEqual(results.map(\.item), MockConformance.items)
 
         let failures = results.filter { $0.status == .fail }
         XCTAssertTrue(failures.isEmpty, MockConformance.format(failures))
 
-        let notProbed: Set<String> = ["S15", "S31", "S35"]   // covered by dedicated tests / no ws in the mock
+        // Covered by dedicated tests / no ws in the mock / need scripted timing or several apps.
+        let notProbed: Set<String> = ["S15", "S31", "S35", "S42", "S44", "S48"]
         let expectedPass = Set(MockConformance.items).subtracting(MockConformance.manualItems).subtracting(notProbed)
         let passed = Set(results.filter { $0.status == .pass }.map(\.item))
         XCTAssertEqual(passed, expectedPass, MockConformance.format(results))
@@ -33,6 +42,21 @@ final class MockConformanceTests: UnivocalTestCase {
         let log = await mock.log.joined(separator: "\n")
         XCTAssertFalse(log.contains("Revenue"), "the probe's fixture text never reaches the log")
         XCTAssertFalse(log.contains("brighter"))
+    }
+
+    func testProbeSkipsHotkeyItemsAgainstADraft1Server() async throws {
+        _ = try await startServer {
+            $0.wordsPerMinute = 6000
+            $0.hotkeyRouting = false
+        }
+        var options = ConformanceOptions(directory: dir)
+        options.autograntExpected = true
+        options.eventTimeout = 5
+        let results = await MockConformance.run(options)
+        for item in ["S37", "S43", "S45", "S50"] {
+            XCTAssertEqual(results.first { $0.item == item }?.status, .skip, item)
+        }
+        XCTAssertTrue(results.filter { $0.status == .fail }.isEmpty, MockConformance.format(results))
     }
 
     func testProbeReportsFailuresAgainstAMisbehavingServer() async throws {

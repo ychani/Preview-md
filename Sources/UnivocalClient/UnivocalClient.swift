@@ -62,6 +62,7 @@ public actor UnivocalClient {
     public private(set) var lastError: UnivocalError?
 
     private nonisolated let broadcaster = StateBroadcaster()
+    private nonisolated let requestBroadcaster = RequestBroadcaster()
     private var link: Link?
     private var nextLinkId = 1
     private var nextRequestId = 1
@@ -90,8 +91,21 @@ public actor UnivocalClient {
     /// A live discovery file is sufficient: when Univocal (or a mock) is already
     /// running, the LaunchServices installation check is skipped.
     public func connect(launchIfNeeded: Bool = true) async throws -> UnivocalServerInfo {
-        if case .connected(let info) = state, let link, !link.tornDown { return info }
-        if let task = connectTask { return try await task.value }
+        try await connect(launchIfNeeded: launchIfNeeded, options: HelloOptions())
+    }
+
+    private func connect(launchIfNeeded: Bool, options: HelloOptions) async throws -> UnivocalServerInfo {
+        var awaited: Task<UnivocalServerInfo, Error>?
+        while true {
+            if case .connected(let info) = state, let link, !link.tornDown { return info }
+            guard let task = connectTask, task != awaited else { break }
+            awaited = task
+            do {
+                return try await task.value
+            } catch let e as UnivocalError where e.code == .consentDenied && e.reason == "quiet" && !options.quiet {
+                continue   // a quiet connect-at-launch was refused; this caller may prompt
+            }
+        }
         if let until = revokedUntil {
             if Date() < until {
                 throw UnivocalError(code: .unauthorized,
@@ -100,9 +114,9 @@ public actor UnivocalClient {
             }
             revokedUntil = nil
         }
-        let task = Task { try await self.performConnect(launchIfNeeded: launchIfNeeded) }
+        let task = Task { try await self.performConnect(launchIfNeeded: launchIfNeeded, options: options) }
         connectTask = task
-        defer { connectTask = nil }
+        defer { if connectTask == task { connectTask = nil } }
         return try await task.value
     }
 
@@ -132,6 +146,11 @@ public actor UnivocalClient {
     public func read(_ request: ReadRequest) async throws -> ReadingSession {
         let info = try await connect()
         guard let link, !link.tornDown else { throw UnivocalError.disconnected() }
+        try validate(request, info: info, link: link)
+        return try await startSession(request, info: info, link: link, answering: nil)
+    }
+
+    private func validate(_ request: ReadRequest, info: UnivocalServerInfo, link: Link) throws {
         let sid = request.sessionId
         guard !request.text.isEmpty else {
             throw UnivocalError(code: .invalidArgument, message: "Nothing to read: the text is empty.", sessionId: sid)
@@ -147,12 +166,20 @@ public actor UnivocalClient {
         if let existing = link.sessions[sid], !existing.isEnded {
             throw UnivocalError(code: .sessionExists, message: "Session \(sid) is still live.", sessionId: sid)
         }
+    }
 
+    /// Sends `read` (+ `append`s) for an already validated request. `answering` adds
+    /// `requestId` to the first chunk (SPEC §5.4).
+    private func startSession(_ request: ReadRequest, info: UnivocalServerInfo, link: Link,
+                              answering requestId: String?) async throws -> ReadingSession {
+        let sid = request.sessionId
+        let utf16Count = request.text.utf16.count
+        let utf8Count = request.text.utf8.count
         let budget = max(1024, min(Self.chunkUTF8Bytes, info.maxFrameBytes / 2))
         var pieces = TextChunker.chunks(request.text, maxUTF8: budget)
         let session = ReadingSession(id: sid, textUTF16Count: utf16Count, client: self)
         link.sessions[sid] = session.sink
-        log("read session=\(sid) utf16=\(utf16Count) utf8=\(utf8Count) chunks=\(pieces.count)")
+        log("read session=\(sid) utf16=\(utf16Count) utf8=\(utf8Count) chunks=\(pieces.count)\(requestId.map { " request=\($0)" } ?? "")")
 
         var index = 0
         do {
@@ -168,6 +195,7 @@ public actor UnivocalClient {
                     if request.startOffset != 0 { msg["startOffset"] = .int(request.startOffset) }
                     if request.showPanel, info.capabilities.contains("panel") { msg["ui"] = "panel" }
                     if let title = request.title { msg["meta"] = .object(["title": .string(title)]) }
+                    if let requestId { msg["requestId"] = .string(requestId) }
                 } else {
                     msg = ["type": "append", "sessionId": .string(sid), "text": .string(pieces[index]), "more": .bool(more)]
                 }
@@ -216,6 +244,159 @@ public actor UnivocalClient {
         return clock.now - start
     }
 
+    // MARK: Hotkey routing (SPEC §5.11, §16)
+
+    /// Hotkey requests from the server (only ever yields when `configuration.hotkeyTarget`
+    /// and the server announced `hotkey-routing`). Each call returns an independent stream;
+    /// every request is delivered to every live stream, but a request can be answered once —
+    /// use one consumer per app. Streams do not end on disconnect; requests pending at
+    /// disconnect are simply never answerable (the server fell back). A request that arrives
+    /// while no stream is alive is declined at once (`other`, "noConsumer") so Univocal falls
+    /// back without waiting for its deadline.
+    public nonisolated func readRequests() -> AsyncStream<UnivocalReadRequest> {
+        requestBroadcaster.makeStream()
+    }
+
+    /// Sends `readAccepted{requestId}`, extending the server's deadline to `acceptedMs`.
+    /// Idempotent; throws `requestAnswered` if `read`/`decline` already went out, and
+    /// `disconnected` if the connection that delivered the request is gone.
+    public func accept(_ request: UnivocalReadRequest) async throws {
+        let link = try hotkeyLink(for: request)
+        switch link.hotkeyRequests[request.id] {
+        case .pending:
+            link.hotkeyRequests[request.id] = .accepted
+            try sendUnacknowledged(["type": "readAccepted", "requestId": .string(request.id)], on: link)
+            log("readAccepted request=\(request.id) after=\(Self.millis(since: request.receivedAt))ms")
+        case .accepted:
+            return
+        case .answered:
+            throw Self.alreadyAnswered(request)
+        case nil:
+            throw Self.unknownHotkeyRequest(request)
+        }
+    }
+
+    /// Answers a hotkey request with a `read` carrying its `requestId` (SPEC §5.4). Same
+    /// validation and chunking as `read(_:)`; `preempt` is sent as `true` regardless. Does NOT
+    /// connect: the request came over the live connection. Throws `unknownRequest` when the
+    /// server says the request is dead (too late — no UI, no retry); a request that fails
+    /// local validation (empty text, bad `startOffset`) stays unanswered so the caller can
+    /// still `decline` it. On success the session is ordinary.
+    public func read(_ request: ReadRequest, answering hotkey: UnivocalReadRequest) async throws -> ReadingSession {
+        let link = try hotkeyLink(for: hotkey)
+        switch link.hotkeyRequests[hotkey.id] {
+        case .pending, .accepted: break
+        case .answered: throw Self.alreadyAnswered(hotkey)
+        case nil: throw Self.unknownHotkeyRequest(hotkey)
+        }
+        guard let info = link.info else { throw UnivocalError.disconnected() }
+        try validate(request, info: info, link: link)
+        link.hotkeyRequests[hotkey.id] = .answered
+        var req = request
+        req.preempt = true   // SPEC §5.4: a hotkey read always takes over
+        log("answering request=\(hotkey.id) with read session=\(req.sessionId) after=\(Self.millis(since: hotkey.receivedAt))ms")
+        do {
+            return try await startSession(req, info: info, link: link, answering: hotkey.id)
+        } catch let e as UnivocalError where e.code == .unknownRequest {
+            log("request=\(hotkey.id) was no longer pending at the server (too late)")
+            throw e
+        }
+    }
+
+    /// Sends `readDecline{requestId, reason, detail?}`; Univocal then runs its own fallback
+    /// (or, for `notFocused`, asks another connection of the same app). Allowed after
+    /// `accept`. Throws `requestAnswered` on a second answer. `detail` is for logs: a short,
+    /// user-neutral word such as "editView" — never document text.
+    public func decline(_ request: UnivocalReadRequest, reason: UnivocalDeclineReason, detail: String? = nil) async throws {
+        let link = try hotkeyLink(for: request)
+        switch link.hotkeyRequests[request.id] {
+        case .pending, .accepted: break
+        case .answered: throw Self.alreadyAnswered(request)
+        case nil: throw Self.unknownHotkeyRequest(request)
+        }
+        link.hotkeyRequests[request.id] = .answered
+        var msg: JSONObject = ["type": "readDecline", "requestId": .string(request.id), "reason": .string(reason.rawValue)]
+        if let detail { msg["detail"] = .string(detail) }
+        try sendUnacknowledged(msg, on: link)
+        log("readDecline request=\(request.id) reason=\(reason.rawValue) after=\(Self.millis(since: request.receivedAt))ms")
+    }
+
+    /// SPEC §16.9 connect-at-launch: connects with `hello{quiet:true}` only if a stored token
+    /// exists AND the discovery file shows a live server. Never launches Univocal, never
+    /// causes a consent prompt. Returns `nil` (no throw) when there is no token, the server
+    /// is not running, or the server refused the quiet hello (`consentDenied{reason:"quiet"}`
+    /// — the stored token is then deleted — or any other denial / `unauthorized`). Throws
+    /// only on transport or protocol failures. Idempotent when already connected.
+    public func connectIfAuthorized() async throws -> UnivocalServerInfo? {
+        if case .connected(let info) = state, let link, !link.tornDown { return info }
+        if let until = revokedUntil, Date() < until {
+            log("connect-at-launch skipped: revoked recently")
+            return nil
+        }
+        let token: String?
+        do {
+            token = try await configuration.tokenStore.token(forServer: configuration.serverBundleId)
+        } catch {
+            log("token store read failed")
+            token = nil
+        }
+        guard token != nil else {
+            log("connect-at-launch skipped: no stored token")
+            return nil
+        }
+        guard UnivocalLocator.discovery(in: configuration.connectDirectory) != nil else {
+            log("connect-at-launch skipped: server not running")
+            return nil
+        }
+        do {
+            return try await connect(launchIfNeeded: false, options: HelloOptions(quiet: true))
+        } catch let e as UnivocalError where [.consentDenied, .unauthorized, .notRunning, .notInstalled].contains(e.code) {
+            if e.code == .consentDenied, e.reason == "quiet", lastError == e { lastError = nil }
+            log("connect-at-launch declined code=\(e.code.rawValue) reason=\(e.reason ?? "-")")
+            return nil
+        }
+    }
+
+    /// SPEC §16.5: the app received a wake URL (`UnivocalWakeURL.parse`). Connects WITHOUT
+    /// launching (the server is running — it just woke us) and sends
+    /// `hello{wakeRequestId: requestId}`; not quiet: consent may be prompted (the user pressed
+    /// the key). If already connected (or connecting), returns that connection's info and
+    /// sends nothing: Univocal then times the wake out and falls back. The matching
+    /// `readRequest` arrives on `readRequests()` right after `welcome`.
+    public func connectForWake(requestId: String) async throws -> UnivocalServerInfo {
+        log("wake request=\(requestId)")
+        return try await connect(launchIfNeeded: false, options: HelloOptions(wakeRequestId: requestId))
+    }
+
+    private func hotkeyLink(for request: UnivocalReadRequest) throws -> Link {
+        guard request.linkId != 0, let link, link.id == request.linkId, !link.tornDown else {
+            throw UnivocalError.disconnected("The connection that delivered this hotkey request has closed.")
+        }
+        return link
+    }
+
+    private func handleReadRequest(_ msg: JSONObject, link: Link) {
+        guard configuration.hotkeyTarget, link.info?.capabilities.contains(Self.hotkeyRoutingCapability) == true else {
+            log("ignoring readRequest: hotkey routing was not negotiated")
+            return
+        }
+        guard let req = UnivocalReadRequest(wire: msg, linkId: link.id, receivedAt: ContinuousClock.now) else {
+            log("ignoring readRequest with an unknown trigger or no requestId")
+            return
+        }
+        guard link.hotkeyRequests[req.id] == nil else {
+            log("ignoring duplicate readRequest request=\(req.id)")
+            return
+        }
+        link.hotkeyRequests[req.id] = .pending
+        log("readRequest request=\(req.id) prefer=\(req.prefer.rawValue) answerMs=\(req.answerMs) acceptedMs=\(req.acceptedMs)")
+        if requestBroadcaster.broadcast(req) == 0 {
+            link.hotkeyRequests[req.id] = .answered
+            try? sendUnacknowledged(["type": "readDecline", "requestId": .string(req.id), "reason": "other", "detail": "noConsumer"], on: link)
+            log("readDecline request=\(req.id) reason=other (no readRequests() consumer)")
+        }
+    }
+
     // MARK: Internals used by ReadingSession
 
     func control(_ session: ReadingSession, type: String, fields: JSONObject = [:]) async throws {
@@ -233,9 +414,9 @@ public actor UnivocalClient {
 
     // MARK: - Connection establishment
 
-    private func performConnect(launchIfNeeded: Bool) async throws -> UnivocalServerInfo {
+    private func performConnect(launchIfNeeded: Bool, options: HelloOptions) async throws -> UnivocalServerInfo {
         do {
-            return try await establish(launchIfNeeded: launchIfNeeded)
+            return try await establish(launchIfNeeded: launchIfNeeded, options: options)
         } catch {
             let e: UnivocalError
             if let u = error as? UnivocalError {
@@ -252,7 +433,7 @@ public actor UnivocalClient {
         }
     }
 
-    private func establish(launchIfNeeded: Bool) async throws -> UnivocalServerInfo {
+    private func establish(launchIfNeeded: Bool, options: HelloOptions) async throws -> UnivocalServerInfo {
         setState(.connecting)
         let dir = configuration.connectDirectory
         let clock = ContinuousClock()
@@ -292,7 +473,7 @@ public actor UnivocalClient {
                                 fatal: true)
         }
         let transport = try await openTransport(discovery, deadline: deadline)
-        return try await handshake(over: transport)
+        return try await handshake(over: transport, options: options)
     }
 
     private func openTransport(_ discovery: UnivocalDiscovery, deadline: ContinuousClock.Instant?) async throws -> any UnivocalTransport {
@@ -326,7 +507,7 @@ public actor UnivocalClient {
         }
     }
 
-    private func handshake(over transport: any UnivocalTransport) async throws -> UnivocalServerInfo {
+    private func handshake(over transport: any UnivocalTransport, options: HelloOptions) async throws -> UnivocalServerInfo {
         let linkId = nextLinkId
         nextLinkId += 1
         let link = Link(id: linkId, transport: transport)
@@ -351,16 +532,20 @@ public actor UnivocalClient {
         let c = configuration.client
         var client: JSONObject = ["id": .string(c.id), "name": .string(c.name), "version": .string(c.version)]
         if let b = c.bundleId { client["bundleId"] = .string(b) }
+        var capabilities = configuration.clientCapabilities
+        if configuration.hotkeyTarget { capabilities.insert(Self.hotkeyTargetCapability) }
         var hello: JSONObject = [
             "type": "hello",
             "protocol": .string(UnivocalWire.protocolName),
             "versions": .array(UnivocalWire.protocolVersions.map { .int($0) }),
             "client": .object(client),
-            "capabilities": .array(configuration.clientCapabilities.sorted().map { .string($0) }),
+            "capabilities": .array(capabilities.sorted().map { .string($0) }),
         ]
         if let token { hello["token"] = .string(token) }
+        if options.quiet { hello["quiet"] = true }
+        if let wake = options.wakeRequestId { hello["wakeRequestId"] = .string(wake) }
         let frame = try encodeFrame(hello, limit: UnivocalWire.minimumMaxFrameBytes)
-        log("hello client=\(c.id) token=\(token == nil ? "absent" : "present")")
+        log("hello client=\(c.id) token=\(token == nil ? "absent" : "present") quiet=\(options.quiet) hotkeyTarget=\(configuration.hotkeyTarget)\(options.wakeRequestId.map { " wakeRequest=\($0)" } ?? "")")
 
         let timeout = configuration.consentTimeout
         link.timeoutTask = Task { [weak self] in
@@ -418,6 +603,14 @@ public actor UnivocalClient {
         case "consentDenied":
             let reason = msg.string("reason") ?? "user"
             log("consent denied reason=\(reason)")
+            if reason == "quiet" {
+                // SPEC §5.3: the presented token is no longer valid; never retry without a user action.
+                do {
+                    try await configuration.tokenStore.setToken(nil, forServer: configuration.serverBundleId)
+                } catch {
+                    log("token store delete failed")
+                }
+            }
             let err = UnivocalError(code: .consentDenied, message: Self.denialMessage(reason), fatal: true, reason: reason)
             link.fatalError = err
             teardown(link, error: err, byUser: false)
@@ -435,6 +628,8 @@ public actor UnivocalClient {
             if let frame = try? UnivocalWire.frame(pong) { link.transport.send(frame: frame) }
         case "state", "sentence", "word", "progress", "rate", "ended":
             routeSessionEvent(msg, type: type, link: link)
+        case "readRequest":
+            handleReadRequest(msg, link: link)
         default:
             break   // unknown types are ignored (SPEC §3.3, CONFORMANCE C3)
         }
@@ -539,6 +734,12 @@ public actor UnivocalClient {
         }
     }
 
+    /// Messages the server never acknowledges (`readAccepted`, `readDecline`).
+    private func sendUnacknowledged(_ message: JSONObject, on link: Link) throws {
+        guard !link.tornDown else { throw link.fatalError ?? UnivocalError.disconnected() }
+        link.transport.send(frame: try encodeFrame(message, limit: link.maxFrameBytes))
+    }
+
     private func encodeFrame(_ msg: JSONObject, limit: Int) throws -> Data {
         let frame: Data
         do {
@@ -563,6 +764,10 @@ public actor UnivocalClient {
         link.timeoutTask?.cancel()
         link.readerTask?.cancel()
         link.transport.close()
+        if !link.hotkeyRequests.isEmpty {
+            log("dropping \(link.hotkeyRequests.values.filter { $0 != .answered }.count) unanswered hotkey request(s)")
+            link.hotkeyRequests.removeAll()
+        }
         if let cont = link.handshake {
             link.handshake = nil
             cont.resume(throwing: error)
@@ -598,14 +803,39 @@ public actor UnivocalClient {
         configuration.logger?("[UnivocalClient] " + line)
     }
 
+    static let hotkeyTargetCapability = "hotkey-target"
+    static let hotkeyRoutingCapability = "hotkey-routing"
+
+    private static func millis(since instant: ContinuousClock.Instant) -> Int {
+        let c = (ContinuousClock.now - instant).components
+        return Int(c.seconds * 1000 + c.attoseconds / 1_000_000_000_000_000)
+    }
+
+    private static func alreadyAnswered(_ r: UnivocalReadRequest) -> UnivocalError {
+        UnivocalError(code: .requestAnswered, message: "Hotkey request \(r.id) was already answered.")
+    }
+
+    private static func unknownHotkeyRequest(_ r: UnivocalReadRequest) -> UnivocalError {
+        UnivocalError(code: .unknownRequest, message: "Hotkey request \(r.id) did not arrive on this connection.")
+    }
+
     private static func denialMessage(_ reason: String) -> String {
         switch reason {
         case "timeout": return "Nobody answered the approval prompt in Univocal."
         case "disabled": return "Univocal is set not to allow other apps."
         case "rateLimited": return "Too many approval requests; try again in a minute."
+        case "quiet": return "Univocal no longer recognises this app's approval."
         default: return "Univocal did not allow this app."
         }
     }
+}
+
+/// Extra `hello` fields for Draft 2 (SPEC §5.1).
+private struct HelloOptions: Sendable {
+    /// `hello.quiet`: connect only if already authorised (§16.9).
+    var quiet = false
+    /// `hello.wakeRequestId`: answering a wake URL (§16.5).
+    var wakeRequestId: String?
 }
 
 // MARK: - Per-connection state (actor-confined)
@@ -622,6 +852,8 @@ private final class Link {
     var timeoutTask: Task<Void, Never>?
     var fatalError: UnivocalError?
     var tornDown = false
+    /// Hotkey requests this connection delivered, by `requestId` (SPEC §5.11).
+    var hotkeyRequests: [String: HotkeyRequestState] = [:]
 
     init(id: Int, transport: any UnivocalTransport) {
         self.id = id

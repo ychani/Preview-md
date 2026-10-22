@@ -60,7 +60,12 @@ final class UnixSocketTransport: UnivocalTransport, @unchecked Sendable {
         case .waiting(let error), .failed(let error):
             // `.waiting` on a Unix socket means ECONNREFUSED/ENOENT; NWConnection would
             // retry forever. Treat it as a failure and let the client decide.
-            fail(UnivocalError.transport("Unix socket: \(error.localizedDescription)"))
+            let failure = UnivocalError.transport("Unix socket: \(error.localizedDescription)")
+            guard isOpen else { return fail(failure) }
+            // After the peer closes, NWConnection may report the failure (ENETDOWN) before the
+            // pending receive hands over the last frames (e.g. `consentDenied`). The receive
+            // completes with that data and the error; fail from there, or shortly after.
+            queue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in self?.fail(failure) }
         case .cancelled:
             fail(nil)
         default:

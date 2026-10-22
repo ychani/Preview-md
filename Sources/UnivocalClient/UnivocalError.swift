@@ -15,9 +15,14 @@ public struct UnivocalError: Error, Sendable, Equatable {
         case protocolError, unsupportedVersion, unauthorized, unknownType, invalidArgument, sessionExists,
              noSession, notOwner, busy, invalidOffset, limitExceeded, rateLimited, engineUnavailable,
              engineError, slowConsumer, internalError = "internal"
+        /// Server (SPEC §10, Draft 2): `read.requestId` names no pending hotkey request; the
+        /// read was NOT started. Treat it as "too late": no error UI, no retry.
+        case unknownRequest
         // client-side codes
         case notInstalled, notRunning, launchTimedOut, consentDenied, consentTimedOut, disconnected,
              transportFailure, textTooLarge, sessionEnded
+        /// `accept`/`decline`/`read(_:answering:)` for a hotkey request already answered.
+        case requestAnswered
     }
 
     public var code: Code

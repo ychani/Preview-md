@@ -52,6 +52,10 @@ public struct UnivocalConfiguration: Sendable {
     public var consentTimeout: Duration
     /// Sent in `hello.capabilities` (SPEC §11). Add "progress" to receive `.progress` events.
     public var clientCapabilities: Set<String>
+    /// Announce client capability `hotkey-target` (SPEC §16): this connection answers
+    /// `readRequest`. Default `false`. When `true` the SDK adds the string to
+    /// `hello.capabilities` itself — do not insert "hotkey-target" into `clientCapabilities`.
+    public var hotkeyTarget: Bool
     public var tokenStore: any UnivocalTokenStore
     /// Diagnostics hook. Receives ids, lengths, codes and durations — never text content.
     public var logger: (@Sendable (String) -> Void)?
@@ -77,6 +81,7 @@ public struct UnivocalConfiguration: Sendable {
         self.launchTimeout = .seconds(10)
         self.consentTimeout = .seconds(130)
         self.clientCapabilities = ["word-events", "sentence-events"]
+        self.hotkeyTarget = false
         self.tokenStore = KeychainTokenStore()
         self.logger = nil
         self.appLocator = { UnivocalLocator.installedAppURL(bundleId: $0) }

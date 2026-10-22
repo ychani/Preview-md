@@ -21,6 +21,12 @@ public struct ConformanceOptions: Sendable {
     public var clientName = "Univocal Connect probe"
     /// Progress lines ("waiting for approval…"); never text content.
     public var progress: (@Sendable (String) -> Void)?
+    /// > 0: also probe hotkey routing (S37, S43) by waiting this long for a `readRequest` —
+    /// a human presses Univocal's read hotkey with the probe's terminal frontmost (the probe
+    /// resolves to it by ancestry), or `hotkeyTrigger` simulates the press.
+    public var hotkeyPressTimeout: TimeInterval = 0
+    /// Called once the probe's `hotkey-target` connection is ready (tests: `MockServer.simulateHotkey`).
+    public var hotkeyTrigger: (@Sendable () -> Void)?
 
     public init(directory: URL) {
         self.directory = directory
@@ -34,14 +40,15 @@ public struct ConformanceResult: Sendable, Equatable, Codable {
     public var detail: String
 }
 
-/// The live-server probe of CONFORMANCE.md: evaluates every server item (S1…S36) it
+/// The live-server probe of CONFORMANCE.md: evaluates every server item (S1…S53) it
 /// can from the outside and reports PASS / FAIL / SKIP. It reads short fixture texts,
 /// so a real Univocal will speak briefly; every session is stopped right away.
 public enum MockConformance {
-    public static let items: [String] = (1...36).map { "S\($0)" }
+    public static let items: [String] = (1...53).map { "S\($0)" }
 
-    /// Items that need a human or a second account; always SKIP.
-    public static let manualItems: Set<String> = ["S3", "S9", "S13", "S14", "S17", "S21", "S34", "S36"]
+    /// Items that need a human, a second account, or a code/log review; always SKIP.
+    public static let manualItems: Set<String> = ["S3", "S9", "S13", "S14", "S17", "S21", "S34", "S36",
+                                                  "S38", "S39", "S40", "S41", "S46", "S47", "S49", "S51", "S52", "S53"]
 
     public static func run(_ options: ConformanceOptions) async -> [ConformanceResult] {
         await withCheckedContinuation { cont in
@@ -132,10 +139,12 @@ private final class Probe {
         } catch {
             fail("S32", "probe aborted: \(error)")
         }
+        hotkeyRouting()
         errorShape()
         webSocketOrigin()
         skip("S15", "needs several prompts; covered by the mock's tests")
         skip("S31", "needs a non-reading client; covered by the mock's tests")
+        for item in ["S42", "S44", "S48"] { skip(item, "needs scripted timing or several apps; covered by the mock's tests") }
     }
 
     // MARK: S1, S2, S8 — discovery
@@ -194,11 +203,14 @@ private final class Probe {
 
     // MARK: S10, S11 — before hello
 
-    private func hello(token: String?, versions: [Int] = [1], proto: String = UnivocalWire.protocolName) -> JSONObject {
+    private func hello(token: String?, versions: [Int] = [1], proto: String = UnivocalWire.protocolName,
+                       hotkeyTarget: Bool = false) -> JSONObject {
+        var caps: [JSONValue] = ["word-events", "sentence-events", "progress"]
+        if hotkeyTarget { caps.append("hotkey-target") }
         var m: JSONObject = [
             "type": "hello", "protocol": .string(proto), "versions": .array(versions.map { .int($0) }),
             "client": ["id": .string(o.clientId), "name": .string(o.clientName), "version": "1"],
-            "capabilities": ["word-events", "sentence-events", "progress"],
+            "capabilities": .array(caps),
         ]
         if let token { m["token"] = .string(token) }
         return m
@@ -342,9 +354,9 @@ private final class Probe {
     }
 
     /// A connection authorised with the probe's token.
-    private func authed() throws -> RawConnectClient {
+    private func authed(hotkeyTarget: Bool = false) throws -> RawConnectClient {
         let c = try connectRaw()
-        try c.send(hello(token: token))
+        try c.send(hello(token: token, hotkeyTarget: hotkeyTarget))
         let m = try c.next(timeout: 10)
         guard m?.messageType == "welcome" else {
             throw Failure(item: "S12", detail: "token not accepted (got \(m?.messageType ?? "nothing"))")
@@ -647,6 +659,84 @@ private final class Probe {
             pass("S30")
         } else {
             fail("S30", "no limitExceeded after \(sent) bytes")
+        }
+    }
+
+    // MARK: S37, S43, S45, S50 — hotkey routing (Draft 2)
+
+    private func hotkeyRouting() {
+        let caps = Set((welcome.array("capabilities") ?? []).compactMap(\.stringValue))
+        guard caps.contains("hotkey-routing") else {
+            // A Draft 1 server would show a real prompt for a quiet hello, so probe nothing.
+            for item in ["S37", "S43", "S45", "S50"] { skip(item, "server does not announce hotkey-routing (Draft 1)") }
+            return
+        }
+        // S50: a quiet hello that needs consent → consentDenied{quiet} and close, no prompt.
+        if let c = try? connectRaw() {
+            var h = hello(token: nil)
+            h["quiet"] = true
+            try? c.send(h)
+            let m = try? c.next(timeout: 5)
+            check("S50", m?.messageType == "consentDenied" && m?.string("reason") == "quiet",
+                  "quiet hello without a token answered \(m?.messageType ?? "nothing") \(m?.string("reason") ?? "")")
+            check("S50", c.readUntilClosed(timeout: 3).closed, "connection stayed open after consentDenied{quiet}")
+            pass("S50")
+            c.close()
+        }
+        // S45: stale readAccepted/readDecline are ignored silently; read{bogus requestId} → unknownRequest, not started.
+        do {
+            let a = try authed(hotkeyTarget: true)
+            defer { a.close() }
+            try a.send(["type": "readAccepted", "requestId": "probe-bogus"])
+            try a.send(["type": "readDecline", "requestId": "probe-bogus", "reason": "other"])
+            try a.send(["type": "read", "id": 1, "sessionId": "probe-h1", "text": "Bogus hotkey request.", "requestId": "probe-bogus"])
+            var others: [JSONObject] = []
+            let e = try a.reply(to: .int(1), timeout: 5) { others.append($0) }
+            errorsSeen.append(e)
+            check("S45", e.messageType == "error" && e.string("code") == "unknownRequest" && e.bool("fatal") == false,
+                  "read with a bogus requestId answered \(e.messageType ?? "?") \(e.string("code") ?? "")")
+            try a.send(["type": "ping", "id": 2])
+            _ = try a.expect("pong", timeout: 5, where: { $0["id"] == .int(2) }) { others.append($0) }
+            check("S45", !others.contains { $0.string("sessionId") == "probe-h1" }, "the bogus-request read was started")
+            check("S45", !others.contains { $0.messageType == "error" }, "a stale readAccepted/readDecline was answered with an error")
+            pass("S45")
+        } catch {
+            fail("S45", "probe failed: \(error)")
+        }
+        // S37, S43: a real press (human or simulated) reaches only the hotkey-target connection.
+        guard o.hotkeyPressTimeout > 0 else {
+            skip("S37", "capability announced; delivery needs a hotkey press (check --hotkey)")
+            skip("S43", "needs a hotkey press (check --hotkey)")
+            return
+        }
+        do {
+            let target = try authed(hotkeyTarget: true)
+            let plain = try authed()
+            defer { target.close(); plain.close() }
+            say("Press Univocal's read hotkey now, with this terminal frontmost (waiting \(Int(o.hotkeyPressTimeout)) s)…")
+            o.hotkeyTrigger?()
+            let r = try target.expect("readRequest", timeout: o.hotkeyPressTimeout)
+            let rid = r.string("requestId") ?? ""
+            let answer = r.int("answerMs") ?? 0, accepted = r.int("acceptedMs") ?? 0
+            check("S43", !rid.isEmpty && rid.count <= 64, "requestId missing or longer than 64")
+            check("S43", r.string("trigger") == "hotkey", "trigger is \(r.string("trigger") ?? "missing")")
+            check("S43", ["selection", "document"].contains(r.string("prefer") ?? ""), "prefer is \(r.string("prefer") ?? "missing")")
+            check("S43", answer >= 300, "answerMs \(answer) < 300")
+            check("S43", accepted >= 1500 && accepted >= answer, "acceptedMs \(accepted) < max(1500, answerMs)")
+            pass("S43", "answerMs \(answer) acceptedMs \(accepted)")
+            try target.send(["type": "read", "id": 1, "requestId": .string(rid), "sessionId": "probe-h2", "text": "Hotkey routing probe."])
+            let ok = try target.reply(to: .int(1), timeout: 5)
+            check("S37", ok.messageType == "ok", "the answering read{requestId} got \(ok.messageType ?? "?") \(ok.string("code") ?? "")")
+            try target.send(["type": "stop", "id": 2, "sessionId": "probe-h2"])
+            _ = try? target.reply(to: .int(2), timeout: 5)
+            try plain.send(["type": "ping", "id": 3])
+            var seen: [JSONObject] = []
+            _ = try plain.expect("pong", timeout: 5, where: { $0["id"] == .int(3) }) { seen.append($0) }
+            check("S37", !seen.contains { $0.messageType == "readRequest" }, "a connection without hotkey-target received a readRequest")
+            pass("S37", "readRequest only on the hotkey-target connection")
+        } catch {
+            fail("S37", "no readRequest within \(Int(o.hotkeyPressTimeout)) s (\(error))")
+            skip("S43", "no readRequest observed")
         }
     }
 
