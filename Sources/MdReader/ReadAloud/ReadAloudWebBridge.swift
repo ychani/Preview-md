@@ -8,19 +8,27 @@ import WebKit
 protocol ReadAloudWebBridging: AnyObject {
     /// The page the next calls go to. Set from each `readAloud` message.
     var webView: WKWebView? { get set }
-    func requestText(request: Int)
+    /// `prefer` (a hotkey read) also asks where to start: the selection or
+    /// the first visible block; nil starts at the top.
+    func requestText(request: Int, prefer: ReadAloudBridge.StartPreference?)
     func activate(generation: Int)
     func reattach(text: String, word: Range<Int>?, sentence: Range<Int>?)
     func apply(word: Range<Int>?, sentence: Range<Int>?)
     func deactivate()
 }
 
+extension ReadAloudWebBridging {
+    func requestText(request: Int) {
+        requestText(request: request, prefer: nil)
+    }
+}
+
 @MainActor
 final class ReadAloudWebBridge: ReadAloudWebBridging {
     weak var webView: WKWebView?
 
-    func requestText(request: Int) {
-        evaluate(ReadAloudBridge.requestTextJS(request: request))
+    func requestText(request: Int, prefer: ReadAloudBridge.StartPreference?) {
+        evaluate(ReadAloudBridge.requestTextJS(request: request, prefer: prefer))
     }
 
     func activate(generation: Int) {

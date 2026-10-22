@@ -17,15 +17,23 @@ import XCTest
 /// With `UNIVOCAL_QA_MOCKCTL` the harness answers the consent prompt by
 /// appending `y` to that file. Tokens live in memory only; the real
 /// Keychain is never touched.
+///
+/// `UNIVOCAL_QA_HOTKEY=1` (with `UNIVOCAL_QA_MOCKCTL`) also runs the hotkey
+/// scenario (SPEC §16): the harness connects as a `hotkey-target`, selects a
+/// paragraph, then drives the mock console through the ctl file —
+/// `frontmost <bundle-id> <this pid>` and `hotkey` — and checks that the
+/// reading starts at the selection, that a second `hotkey` pauses (Univocal
+/// toggles) and a third resumes.
 @MainActor
 final class ReadAloudLiveQATests: XCTestCase {
     private final class Backend: ReadAloudBackend, @unchecked Sendable {
         let client: UnivocalClient
-        init(connectDir: URL) {
+        init(connectDir: URL, hotkeyTarget: Bool = false) {
             var config = UnivocalConfiguration(client: UnivocalClientIdentity(
                 id: "com.narnarlabs.previewmd", name: "PreviewMD (QA)", version: "qa"))
             config.connectDirectory = connectDir
             config.tokenStore = InMemoryTokenStore()
+            config.hotkeyTarget = hotkeyTarget
             client = UnivocalClient(configuration: config)
         }
         func availability() -> UnivocalAvailability {
@@ -34,6 +42,20 @@ final class ReadAloudLiveQATests: XCTestCase {
         func connectionStates() -> AsyncStream<UnivocalConnectionState> { client.stateUpdates() }
         func startReading(_ request: ReadRequest) async throws -> any ReadAloudSession {
             try await client.read(request)
+        }
+        func readRequests() -> AsyncStream<UnivocalReadRequest> { client.readRequests() }
+        func accept(_ request: UnivocalReadRequest) async throws { try await client.accept(request) }
+        func decline(_ request: UnivocalReadRequest, reason: UnivocalDeclineReason, detail: String?) async throws {
+            try await client.decline(request, reason: reason, detail: detail)
+        }
+        func startReading(_ request: ReadRequest, answering hotkey: UnivocalReadRequest) async throws
+            -> any ReadAloudSession {
+            try await client.read(request, answering: hotkey)
+        }
+        func connectIfAuthorized() async throws -> Bool { try await client.connectIfAuthorized() != nil }
+        func connectForWake(requestId: String) async throws { _ = try await client.connectForWake(requestId: requestId) }
+        func serverAppearances() -> AsyncStream<UnivocalDiscovery> {
+            UnivocalLocator.serverAppearances(configuration: client.configuration)
         }
     }
 
@@ -145,7 +167,108 @@ final class ReadAloudLiveQATests: XCTestCase {
                                               atomically: true, encoding: .utf8)
     }
 
+    func testHotkeyAgainstMock() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["UNIVOCAL_QA_HOTKEY"] == "1", let dir = env["UNIVOCAL_QA_DIR"],
+              let out = env["UNIVOCAL_QA_OUT"], let ctl = env["UNIVOCAL_QA_MOCKCTL"] else {
+            throw XCTSkip("set UNIVOCAL_QA_HOTKEY=1, UNIVOCAL_QA_DIR, UNIVOCAL_QA_OUT and UNIVOCAL_QA_MOCKCTL")
+        }
+        let outURL = URL(fileURLWithPath: out, isDirectory: true)
+        try FileManager.default.createDirectory(at: outURL, withIntermediateDirectories: true)
+        func console(_ line: String) throws {
+            let handle = try FileHandle(forWritingTo: URL(fileURLWithPath: ctl))
+            handle.seekToEndOfFile()
+            handle.write(Data((line + "\n").utf8))
+            try handle.close()
+            note("mock> \(line)")
+        }
+
+        let relay = Relay()
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.userContentController.add(relay, name: ReadAloudBridge.messageHandlerName)
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 760, height: 300), configuration: config)
+        webView.navigationDelegate = relay
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 760, height: 300),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = webView
+        window.orderBack(nil)
+        defer {
+            window.orderOut(nil)
+            config.userContentController.removeScriptMessageHandler(forName: ReadAloudBridge.messageHandlerName)
+        }
+
+        let backend = Backend(connectDir: URL(fileURLWithPath: dir), hotkeyTarget: true)
+        let controller = ReadAloudController(backend: backend, openURL: { _ in })
+        relay.controller = controller
+        controller.documentTitle = { "hotkey.md" }
+        controller.hotkeySource = { .preview }
+        controller.startHotkeyIntegration()
+
+        let html = try XCTUnwrap(MdReaderResources.previewHTMLURL)
+        webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
+        try spin(until: "shell loaded", 30) { relay.loaded && controller.highlightMode != nil }
+        let target = "The hotkey starts reading here."
+        try evaluate(try XCTUnwrap(MarkdownRenderBridge.renderJS(for: """
+            # Hotkey
+
+            First paragraph that should be skipped.
+
+            Second paragraph, also skipped.
+
+            \(target) It keeps going after that.
+            """)) + "; 0")
+
+        // Connect as a hotkey target (the first time needs consent).
+        let connected = Flag()
+        let asked = Flag()
+        let states = backend.connectionStates()
+        let watcher = Task {
+            for await state in states where state == .awaitingConsent { asked.value = true }
+        }
+        defer { watcher.cancel() }
+        Task {
+            _ = try? await backend.client.connect(launchIfNeeded: false)
+            connected.value = true
+        }
+        try spin(until: "consent or connected", 30) { connected.value || asked.value }
+        if !connected.value { try console("y") }
+        try spin(until: "connected", 60) { connected.value }
+
+        // Select the target sentence, then press the mock's hotkey with
+        // this process frontmost.
+        try evaluate("""
+            (function () {
+              var w = document.createTreeWalker(document.getElementById('previewmd-root'), NodeFilter.SHOW_TEXT);
+              for (var n = w.nextNode(); n; n = w.nextNode()) {
+                var i = n.data.indexOf('The hotkey');
+                if (i >= 0) { window.getSelection().setBaseAndExtent(n, i, n, i + 10); return 0; }
+              }
+              return 1;
+            })()
+            """)
+        try console("frontmost com.narnarlabs.previewmd \(getpid())")
+        try console("hotkey")
+        try spin(until: "routed and playing", 30) { controller.status == .playing }
+        try spin(until: "first sentence", 10) { controller.currentSentence != nil }
+        let sentence = try painted("univocal-sentence").joined()
+        note("first sentence: \(sentence.debugDescription)")
+        XCTAssertTrue(sentence.hasPrefix(target), "reading did not start at the selection: \(sentence)")
+        try snapshot(outURL, "hotkey-routed")
+
+        try console("hotkey")
+        try spin(until: "toggled paused", 10) { controller.status == .paused }
+        try console("hotkey")
+        try spin(until: "toggled playing", 10) { controller.status == .playing }
+        controller.stop()
+        try spin(until: "idle", 10) { controller.status == .idle }
+        try log.joined(separator: "\n").write(to: outURL.appendingPathComponent("hotkey.log"),
+                                              atomically: true, encoding: .utf8)
+    }
+
     // MARK: - Helpers
+
+    @MainActor private final class Flag { var value = false }
 
     private func note(_ line: String) { log.append(line); print("[qa] " + line) }
 

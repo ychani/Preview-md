@@ -49,8 +49,10 @@ final class AppState: ObservableObject {
     }
     @Published var viewMode: ViewMode = .preview {
         didSet {
-            // No preview to highlight: stop rather than read on invisibly.
-            if viewMode == .edit { readAloud.stop() }
+            // Edit view: no preview to highlight, so stop rather than read
+            // on invisibly. An editor reading (Univocal's hotkey) stops on
+            // any switch: its editor is replaced.
+            if viewMode != oldValue { readAloud.viewModeDidChange(toEdit: viewMode == .edit) }
         }
     }
 
@@ -61,6 +63,34 @@ final class AppState: ObservableObject {
     /// the preview).
     var canReadAloud: Bool {
         selectedFile != nil && viewMode != .edit && loadErrorMessage == nil
+    }
+
+    /// What Univocal's read hotkey reads now: the preview, or the editor in
+    /// Edit view (in Split view only while the editor has focus). All
+    /// windows share this state, so the key window decides only whether
+    /// there is one and which pane has focus.
+    func readAloudHotkeySource() -> ReadAloudController.HotkeySource {
+        guard selectedFile != nil, loadErrorMessage == nil else { return .noDocument }
+        guard let window = Self.documentWindow() else { return .noWindow }
+        if isReadingFile { return .loading }
+        func editor(requireFocus: Bool) -> (any ReadAloudEditorSurface)? {
+            EditorTextViewLocator.textView(in: window, showing: editingContent, requireFocus: requireFocus)
+                .map { TextViewReadAloudSurface(textView: $0) }
+        }
+        switch viewMode {
+        case .preview:
+            return .preview
+        case .edit:
+            return .editor(editor(requireFocus: false))
+        case .split:
+            return editor(requireFocus: true).map { .editor($0) } ?? .preview
+        }
+    }
+
+    /// The key (else main) window when it is a document window — not the
+    /// About panel or an alert.
+    static func documentWindow() -> NSWindow? {
+        [NSApp.keyWindow, NSApp.mainWindow].compactMap { $0 }.first { !($0 is NSPanel) && $0.isVisible }
     }
 
     /// Which population `files` represents. Drives sidebar header + context menu.
@@ -211,6 +241,8 @@ final class AppState: ObservableObject {
 
     init() {
         readAloud.documentTitle = { [weak self] in self?.selectedFile?.name }
+        readAloud.hotkeySource = { [weak self] in self?.readAloudHotkeySource() ?? .noDocument }
+        readAloud.startHotkeyIntegration()
         loadRecents()
         Self.migrateLegacyBookmark()
         scheduleWorkspaceRestore()
