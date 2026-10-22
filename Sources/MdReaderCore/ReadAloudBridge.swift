@@ -17,9 +17,10 @@ public enum ReadAloudBridge {
         /// The script loaded in a new page (first load or a shell reload).
         /// `highlightMode` is `"css-highlight"` or `"mark"` (diagnostics).
         case ready(highlightMode: String)
-        /// Reply to `requestTextJS(request:)`: the document text, stamped
-        /// with the page's `generation` for `activateJS(generation:)`.
-        case text(String, generation: Int, request: Int)
+        /// Reply to `requestTextJS(request:prefer:)`: the document text,
+        /// stamped with the page's `generation` for `activateJS(generation:)`,
+        /// and where to start reading (0 unless `prefer` was given).
+        case text(String, generation: Int, request: Int, startOffset: Int = 0)
         /// The document changed while reading: restart at `startOffset`
         /// (the current sentence, re-mapped onto `text`).
         case textChanged(String, startOffset: Int, generation: Int)
@@ -40,7 +41,12 @@ public enum ReadAloudBridge {
             guard let text = dict["text"] as? String,
                   let generation = integer(dict["generation"]),
                   let request = integer(dict["request"]) else { return nil }
-            return .text(text, generation: generation, request: request)
+            var startOffset = 0
+            if let raw = dict["startOffset"], !(raw is NSNull) {
+                guard let offset = integer(raw), offset <= text.utf16.count else { return nil }
+                startOffset = offset
+            }
+            return .text(text, generation: generation, request: request, startOffset: startOffset)
         case "textChanged":
             guard let text = dict["text"] as? String,
                   let generation = integer(dict["generation"]),
@@ -68,10 +74,21 @@ public enum ReadAloudBridge {
 
     // MARK: - Swift → JS
 
+    /// Where a reading asked for by Univocal's hotkey starts (SPEC §16.12).
+    public enum StartPreference: String, Sendable {
+        /// The start of the preview's selection, else the first fully
+        /// visible block.
+        case selection
+        /// The first fully visible block, even with a selection.
+        case document
+    }
+
     /// Asks the page for its text; it replies with `.text` (or `.error`)
-    /// carrying `request`.
-    public static func requestTextJS(request: Int) -> String {
-        call("requestText", String(request))
+    /// carrying `request`. With `prefer`, the reply's `startOffset` says
+    /// where to start; without it (the app's own command) it is 0.
+    public static func requestTextJS(request: Int, prefer: StartPreference? = nil) -> String {
+        guard let prefer else { return call("requestText", String(request)) }
+        return call("requestText", "\(request),{\"prefer\":\"\(prefer.rawValue)\"}")
     }
 
     /// Starts highlighting the text the page posted with `generation`.

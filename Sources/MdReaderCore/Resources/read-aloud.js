@@ -7,13 +7,14 @@
 // through webkit.messageHandlers.readAloud:
 //
 //   { kind: "ready", highlightMode }                         once at load
-//   { kind: "text", text, generation, request, utf16Length } reply to requestText
+//   { kind: "text", text, generation, request, utf16Length, startOffset }
+//                                                            reply to requestText
 //   { kind: "textChanged", text, startOffset, generation, utf16Length }
 //                                                            the document changed mid-session
 //   { kind: "seek", offset }                                 click-to-seek
 //   { kind: "error", code: "noContent" | "tooLarge", request? }
 //
-// Swift → JS (window.PreviewMDReadAloud): requestText(request), activate(
+// Swift → JS (window.PreviewMDReadAloud): requestText(request[, { prefer }]), activate(
 // { generation } | { text, word, sentence }), apply({ word, sentence }),
 // clear(), deactivate(). Ranges are [start, end] arrays or null.
 //
@@ -48,6 +49,8 @@
   var hasAttribute = Element.prototype.hasAttribute;
   var getAttribute = Element.prototype.getAttribute;
   var getSelection = win.getSelection;
+  var rangeRect = Range.prototype.getBoundingClientRect;
+  var comparePoint = Range.prototype.comparePoint;
   var scrollTo = win.scrollTo;
   var setTimer = win.setTimeout;
   var clearTimer = win.clearTimeout;
@@ -193,12 +196,90 @@
     return true;
   }
 
-  function requestText(request) {
+  // `opts.prefer` (Univocal's hotkey, SPEC §5.11/§16.12) also picks where
+  // to start: "selection" → the start of a selection in the document, else
+  // (and for "document") the first fully visible block. Without it (the
+  // app's own Read Aloud command) reading starts at the top.
+  function requestText(request, opts) {
+    var prefer = opts && (opts.prefer === 'selection' || opts.prefer === 'document') ? opts.prefer : null;
+    // Before extract(): it puts <mark> pieces back, which may hold the selection.
+    var anchor = prefer === 'selection' ? selectionStart() : null;
     var x = remember(extract());
+    var startOffset = 0;
+    if (prefer) {
+      var s = anchor ? pointOffset(x, anchor.node, anchor.offset) : null;
+      startOffset = s !== null ? s : firstVisibleOffset(x);
+    }
     if (active && baseline) repaint(false);
     if (!checkText(x.text, request)) return;
     post({ kind: 'text', text: x.text, generation: x.generation, request: request,
-           utf16Length: x.text.length });
+           utf16Length: x.text.length, startOffset: startOffset });
+  }
+
+  // ── Where a hotkey read starts ────────────────────────────────
+  // The start of a non-empty selection inside the document, as a boundary
+  // point outside any <mark> piece; null without one.
+  function selectionStart() {
+    var sel = getSelection.call(win);
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    var r = sel.getRangeAt(0);
+    if (!root.contains(r.startContainer)) return null;
+    return originalPoint(r.startContainer, r.startOffset);
+  }
+
+  function originalPoint(node, offset) {
+    var origin = pieceOrigin.get(node);
+    if (origin) return { node: origin.node, offset: offset + origin.base };
+    return { node: node, offset: offset };
+  }
+
+  // The offset of a boundary point in `x`: exact inside an extracted text
+  // node; otherwise (an element boundary, a skipped code block) the start of
+  // the first extracted text after the point. Null when nothing follows.
+  function pointOffset(x, node, offset) {
+    var exact = textOffset(x, node, offset);
+    if (exact !== null) return exact;
+    if (!node || !root.contains(node)) return null;
+    var at = createRange.call(doc);
+    try { at.setStart(node, offset); } catch (e) { return null; }
+    var i = core.lowerBound(x.entries.length, function (k) {
+      return comparePoint.call(at, x.entries[k].node, 0) >= 0;
+    });
+    return i < x.entries.length ? x.entries[i].start : null;
+  }
+
+  // The start of the first fully visible block: candidates are the text
+  // nodes that begin a block or line (offset 0 or right after a separator
+  // newline), measured lazily from the first one that is not above the
+  // viewport. 0 when nothing is visible.
+  function firstVisibleOffset(x) {
+    var starts = [];
+    for (var i = 0; i < x.entries.length; i++) {
+      var s = x.entries[i].start;
+      if (s === 0 || x.text.charCodeAt(s - 1) === 10) starts.push(i);
+    }
+    if (!starts.length) return 0;
+    var height = win.innerHeight;
+    var rects = [];
+    function rectOf(k) {
+      if (rects[k] === undefined) {
+        var r = createRange.call(doc);
+        r.selectNodeContents(x.entries[starts[k]].node);
+        rects[k] = rangeRect.call(r);
+      }
+      return rects[k];
+    }
+    var first = core.lowerBound(starts.length, function (k) { return rectOf(k).bottom > 0; });
+    var tops = [];
+    var bottoms = [];
+    for (var k = first; k < starts.length; k++) {
+      var rect = rectOf(k);
+      tops.push(rect.top);
+      bottoms.push(rect.bottom);
+      if (rect.top >= height) break;
+    }
+    var v = core.firstVisibleIndex(tops, bottoms, height);
+    return v < 0 ? 0 : x.entries[starts[first + v]].start;
   }
 
   function normRange(r) {
@@ -506,17 +587,15 @@
   // Links, controls, wikilinks and text selection keep their usual meaning.
   var INTERACTIVE = 'a, button, input, select, textarea, label, summary, .wikilink';
 
-  function offsetAt(node, offset) {
-    if (!baseline || !node || node.nodeType !== 3) return null;
-    var origin = pieceOrigin.get(node);
-    if (origin) {
-      offset += origin.base;
-      node = origin.node;
-    }
-    var i = baseline.index.get(node);
+  // The offset of (node, offset) in extraction `x` when node is one of its
+  // text nodes (or a <mark> piece of one); else null.
+  function textOffset(x, node, offset) {
+    if (!x || !node || node.nodeType !== 3) return null;
+    var p = originalPoint(node, offset);
+    var i = x.index.get(p.node);
     if (i === undefined) return null;
-    var e = baseline.entries[i];
-    return e.start + Math.max(0, Math.min(offset, e.length));
+    var e = x.entries[i];
+    return e.start + Math.max(0, Math.min(p.offset, e.length));
   }
 
   doc.addEventListener('click', function (ev) {
@@ -529,7 +608,7 @@
     if (sel && !sel.isCollapsed) return;
     var caret = caretRangeFromPoint.call(doc, ev.clientX, ev.clientY);
     if (!caret) return;
-    var offset = offsetAt(caret.startContainer, caret.startOffset);
+    var offset = textOffset(baseline, caret.startContainer, caret.startOffset);
     if (offset !== null) post({ kind: 'seek', offset: offset });
   }, false);
 
