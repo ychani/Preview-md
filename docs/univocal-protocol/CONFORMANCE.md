@@ -57,6 +57,28 @@ Legend: ✓ covered · ◐ partial · — not covered · manual.
 | S35 | WebSocket (if offered): loopback only, text frames only, `Origin` present → 403, token required. | 3.2 | — (not in mock v1) | — | ◐ (Origin probe if `ws` advertised) |
 | S36 | Native-messaging host (if shipped) overrides `hello.client` with the extension identity and forwards everything else unchanged. | 9.4 | — | — | manual |
 
+### Hotkey routing (Draft 2; servers announcing `hotkey-routing`)
+
+| # | Requirement | § | Mock | SDK tests | Probe |
+|---|---|---|---|---|---|
+| S37 | Announces `hotkey-routing` in `welcome` iff it implements §16; sends `readRequest` only to connections that announced `hotkey-target`. | 11, 16.1 | ✓ | ✓ (two clients, one without the capability) | ✓ (capability present → expects a request after `hotkey` is simulated only in mock; live: SKIP manual) |
+| S38 | Captures the frontmost app synchronously on the hotkey before capturing the selection or showing UI. | 16.2 | n/a (frontmost is injected) | — | manual |
+| S39 | Resolves a connection to the frontmost app by parent-pid chain (≤ 16 hops) or executable-path-inside-bundle; never uses `responsibility_get_pid_responsible_for_pid`; never trusts `hello.client.bundleId`. | 16.3 | ✓ (real `proc_pidinfo` walk; spawned child process test) | ✓ | manual (code review) |
+| S40 | Toggle: active session whose owner resolves to the frontmost app → `state{paused}`/`state{playing}`, no `readRequest`. | 16.7 | ✓ | ✓ | manual |
+| S41 | Otherwise ends the active session with `ended{preempted, by:"Univocal"}` before routing. | 16.4 step 2 | ✓ | ✓ | manual |
+| S42 | Candidate order: most recent inbound message first, then newest connection; `readDecline{notFocused}` moves to the next candidate within the cascade budget. | 16.4 steps 3, 5 | ✓ | ✓ (two connections of one client) | — |
+| S43 | `readRequest` carries `requestId`, `trigger:"hotkey"`, `prefer`, `answerMs ≥ 300`, `acceptedMs ≥ 1500`, `acceptedMs ≥ answerMs`. | 5.11 | ✓ | ✓ | ✓ (field check if a request is observed) |
+| S44 | Deadline semantics: an answer counts when its frame arrives before the deadline; `readAccepted` extends to `acceptedMs`; expiry → fallback and the late `read` → `error{unknownRequest}`, not started. | 5.11, 16.4 | ✓ (deadlines configurable down to ms for tests) | ✓ | — |
+| S45 | `read{requestId}` for a dead/unknown id → `error{unknownRequest}` non-fatal, not started; stale `readAccepted`/`readDecline` ignored silently. | 5.4, 5.11 | ✓ | ✓ | ✓ (sends a bogus requestId) |
+| S46 | Exactly one outcome per press: toggle, one client read, or one fallback; never two fallbacks, never fallback after accepting a client's `read`; a newer press drops the older pending request. | 16.4, 16.8 | ✓ (outcome enum) | ✓ | manual |
+| S47 | Wake path: reads the frontmost bundle's `UnivocalConnect` dict, requires `Versions` ∩ own ≠ ∅, `HotkeyTarget == true`, `WakeURLScheme` set; opens `<scheme>://univocal-connect/read?requestId=…&v=…` with `activates = false`. | 16.5 | ✓ (injectable opener; reads a test bundle's Info.plist) | ✓ | manual |
+| S48 | Matches the woken connection by `hello.wakeRequestId` **and** process resolution; a `wakeRequestId` matching nothing is an ordinary hello; delivers the pending `readRequest` right after `welcome`. | 16.5 | ✓ | ✓ | — |
+| S49 | Wake budget ≥ 1.5 s, suspended while `consentPending` is outstanding; `consentDenied` → fallback. | 16.5, 16.6 | ✓ | ✓ (`.askOnStdin` + `grantPending()`) | manual |
+| S50 | `hello{quiet:true}` needing consent → `consentDenied{reason:"quiet"}` then close; no prompt shown. | 5.1, 5.3, 16.9 | ✓ | ✓ | ✓ (probe sends quiet hello without a token) |
+| S51 | Frontmost == server itself → no routing, own toggle. | 16.11 | ✓ (frontmost pid == mock pid) | ✓ | manual |
+| S52 | Native-messaging host (if shipped) announces `hotkey-target` only when the extension asked; forwards `readRequest`, `readAccepted`, `readDecline`, `read{requestId}` unchanged. | 16.10 | — | — | manual |
+| S53 | Logs for hotkey routing contain pids, bundle ids, request ids, reasons and timings only — never selection or document text. | 13, 16 | ✓ (log scan in tests) | ✓ | manual (log review) |
+
 ## B. Client MUST items
 
 | # | Requirement | § | Mock | SDK tests | Probe |
@@ -76,6 +98,26 @@ Legend: ✓ covered · ◐ partial · — not covered · manual.
 | C13 | Does not log received offsets with document text at shipping log levels. | 13 | — | — | manual |
 | C14 | Node/Electron clients connect from the Node context over the Unix socket, not the renderer WebSocket. | 9.3 | — | — | manual (code review) |
 
+### Hotkey routing (Draft 2; clients announcing `hotkey-target`)
+
+Coverage columns here: **Mock** = the mock's `simulateHotkey` exercises it;
+**SDK tests** = `Tests/UnivocalClientTests`; **PreviewMD tests** =
+`Tests/MdReaderTests` (controller with fake backend, JS harness, live QA
+harness) — replacing the Probe column, which does not apply to clients.
+
+| # | Requirement | § | Mock | SDK tests | PreviewMD tests |
+|---|---|---|---|---|---|
+| C15 | Announces `hotkey-target` only on a connection that will answer requests; sends `readAccepted`/`readDecline`/`read.requestId` only to a server that announced `hotkey-routing`. | 11, 16.1 | ✓ | ✓ | ✓ (configuration test) |
+| C16 | Answers every `readRequest` it receives with exactly one of `read{requestId}` or `readDecline{requestId}` (optionally after `readAccepted`), ignoring unknown `trigger`s. | 5.11 | ✓ | ✓ | ✓ (controller + fake backend) |
+| C17 | Sends `readAccepted` immediately when the text is not already in hand, then `read` within `acceptedMs`; sends `read` directly when cached. Measured: `readAccepted` < 50 ms after receipt in tests. | 5.11, 16.6 | ✓ | ✓ (timing assertions with the mock's deadlines) | ✓ (live QA harness: WKWebView extraction path) |
+| C18 | Honours `prefer`: selection present + `"selection"` → document text with `startOffset` at the selection start; otherwise document from the first visible block; `noContent` only when there is no document. | 16.12 | ✓ | — | ✓ (JS selection→offset, visible-block offset; controller decision table) |
+| C19 | Declines `notFocused` when it owns no key/main window; `other` with `detail` where highlighting is impossible (PreviewMD: Edit view); never does nothing. | 16.11, 16.12 | ✓ | ✓ | ✓ |
+| C20 | Treats `error{unknownRequest}` on its answering `read` as "too late": clears local state, no error UI, no retry. | 5.4 | ✓ | ✓ | ✓ |
+| C21 | Declares `UnivocalConnect{Versions, HotkeyTarget, WakeURLScheme}` in Info.plist with the scheme registered in `CFBundleURLTypes`; handles `<scheme>://univocal-connect/read?requestId=…` without opening a window or activating; sends `hello{wakeRequestId}`; ignores unknown query items. | 16.5, App. B | ✓ (mock opens the URL via injectable opener; test bundle) | ✓ (`UnivocalAppDeclaration`, `UnivocalWakeURL`) | ✓ (Info.plist test; URL handler test) |
+| C22 | Connect-at-launch: connects with `hello{quiet:true}` only when a token exists and the discovery file shows a live server; never launches the server; never prompts at launch; on `consentDenied{quiet}` discards the token; reconnects when the server appears. | 16.9 | ✓ | ✓ (`connectIfAuthorized`, `serverAppearances`) | ✓ (controller: launch with/without token; no `launcher` call) |
+| C23 | Toggle is server-side: the client applies `state{paused}`/`state{playing}` from the hotkey like any other state change (no local toggling on the wake URL or request). | 16.7 | ✓ | ✓ | ✓ |
+| C24 | Hotkey routing adds nothing to Quick Look or other extension targets of the same bundle (PreviewMD: `MdReaderQL` unchanged). | — | — | — | ✓ (build + resources test) |
+
 ## C. How to run
 
 ```sh
@@ -83,6 +125,12 @@ Legend: ✓ covered · ◐ partial · — not covered · manual.
 swift test --filter UnivocalClientTests          # client items + mock server items
 swift run univocal-mock --dir /tmp/uc-qa --consent ask --verbose   # manual QA server
 UNIVOCAL_CONNECT_DIR=/tmp/uc-qa open -a PreviewMD                  # app against the mock
+
+# Hotkey routing against the mock (S37–S51 / C15–C23): in the serve console
+#   frontmost com.narnarlabs.previewmd            # or: frontmost <pid>
+#   hotkey                                        # = hotkey selection
+#   hotkey document
+# prints the outcome: toggled | routed <client> | declined <client> <reason> | timed out | woke <url> | fell back <why>
 
 # Against a live Univocal (dev build), from the PreviewMD repo
 swift run univocal-mock check --dir "$HOME/Library/Application Support/Univocal Dev/Connect"

@@ -8,7 +8,12 @@ Univocal itself is a separate, proprietary product; this document only governs
 the wire protocol between Univocal and other applications on the same Mac.
 -->
 
-**Status:** Draft 1 (2026-10-21). **Protocol identifier:** `univocal-connect`. **Major version:** `1`.
+**Status:** Draft 2 (2026-10-22; Draft 1 was 2026-10-21). **Protocol identifier:** `univocal-connect`. **Major version:** `1`.
+
+Draft 2 adds **hotkey routing** (§5.11, §16) as additive capabilities
+`hotkey-routing` (server) / `hotkey-target` (client), the optional
+`read.requestId` and `hello.quiet` fields, and error code `unknownRequest`. No
+existing message changed; Draft 1 peers interoperate unchanged.
 
 The key words MUST, MUST NOT, REQUIRED, SHALL, SHOULD, SHOULD NOT, RECOMMENDED,
 MAY and OPTIONAL are to be interpreted as described in RFC 2119.
@@ -40,6 +45,9 @@ Everything in this document happens on one machine. Text never leaves the Mac.
 | Session | One reading of one text, identified by a client-chosen `sessionId`, owned by the connection that created it. |
 | Owner | The connection that created the active session. |
 | Offset | A UTF-16 code-unit index into the session text (§7). |
+| Frontmost app | `NSWorkspace.shared.frontmostApplication` at the instant the server's read hotkey fires (§16). |
+| Hotkey request | A server-initiated `readRequest` (§5.11) asking a client to read in place of the server's own panel; identified by a server-chosen `requestId`. |
+| Target | A connected, granted connection that announced `hotkey-target` and resolves (§16.3) to the frontmost app. |
 
 ## 3. Transports and framing
 
@@ -189,6 +197,8 @@ server, `S→C` server to client.
 | `client.bundleId` | O | Informational; the server trusts the code identity it resolves itself (§6.2), never this field. |
 | `capabilities` | O | Client capability strings (§11). |
 | `token` | O | A previously granted token. Omit on first contact. |
+| `quiet` | O | `true`: "connect only if already authorised" — if consent would be needed the server MUST NOT prompt and MUST reply `consentDenied{reason:"quiet"}` then close (§16.9). Default `false`. |
+| `wakeRequestId` | O | The `requestId` from a wake URL (§16.5); tells the server which pending hotkey request this connection is answering. |
 
 The first message on a connection MUST be `hello`. Anything else is a fatal
 `protocolError`. If no common major version exists the server replies
@@ -229,10 +239,13 @@ immediately followed by `welcome` on the same connection (the client MUST NOT
 re-send `hello`), or
 
 ```json
-{ "type": "consentDenied", "requestId": "c7f1…", "reason": "user" | "timeout" | "disabled" | "rateLimited" }
+{ "type": "consentDenied", "requestId": "c7f1…", "reason": "user" | "timeout" | "disabled" | "rateLimited" | "quiet" }
 ```
 
-followed by the server closing the connection. The client MUST store a granted
+followed by the server closing the connection. `reason:"quiet"` is only sent in
+answer to `hello{quiet:true}` (§16.9): no prompt was shown; the client SHOULD
+discard the token it presented (it is no longer valid) and MUST NOT retry
+without a user action. The client MUST store a granted
 token securely (Keychain on macOS) keyed by the server's `bundleId`, and present
 it in future `hello`s. A token that is unknown or revoked yields
 `consentPending` again (the server re-prompts), unless the grant was revoked
@@ -265,9 +278,13 @@ While waiting, the client SHOULD show "Waiting for approval in Univocal…".
 | `ui` | O | `"none"` (default): the server shows no reading panel, only its menu-bar state. `"panel"`: server also shows its own panel (capability `panel`). |
 | `more` | O | `true` if `append` chunks follow (§8). |
 | `meta.title` | O | Shown in the server's menu-bar/panel UI. Never logged. |
+| `requestId` | O | Answers the server's `readRequest` with that id (§5.11, §16). A `read` whose `requestId` is unknown or expired is **not started**: the server replies `error{code:"unknownRequest"}` (non-fatal) and nothing else changes. |
 
 On acceptance the server sends `ok{id, sessionId}` then `state{loading}`. Any
-other active session on **any** connection ends first (§6.4).
+other active session on **any** connection ends first (§6.4). A `read` that
+answers a hotkey request behaves exactly like any other `read` once accepted;
+`preempt` is implied `true` for it (the hotkey already ended whatever was
+playing, §16.4 step 2).
 
 ### 5.5 Session control (C→S): `pause`, `resume`, `stop`, `seek`, `setRate`, `append`
 
@@ -358,6 +375,63 @@ closes the connection right after. Codes are in §10.
   "voices": [ { "id": "bf_emma", "name": "Emma", "lang": "en-GB" },
               { "id": "sup:ko:F1", "name": "Korean · F1", "lang": "ko" } ] }
 ```
+
+### 5.11 Hotkey requests: `readRequest` (S→C), `readAccepted`, `readDecline` (C→S) — capabilities `hotkey-routing` / `hotkey-target`
+
+Sent by the server only to a connection that announced client capability
+`hotkey-target`, and only when the server announced `hotkey-routing`. The full
+behaviour — when the server sends it, to whom, and what happens otherwise — is
+§16; this section is the wire contract.
+
+```json
+{ "type": "readRequest", "requestId": "h3a9…", "trigger": "hotkey",
+  "prefer": "selection", "answerMs": 300, "acceptedMs": 1500 }
+```
+
+| Field | | Notes |
+|---|---|---|
+| `requestId` | R | Server-chosen, unique per server run; opaque to the client (≤ 64 chars). |
+| `trigger` | R | `"hotkey"` in v1. Clients MUST ignore requests with a trigger they do not know. |
+| `prefer` | R | `"selection"`: read the selection if there is one, else the document from the visible position. `"document"`: read the document from the visible position even if there is a selection. |
+| `answerMs` | R | Milliseconds, measured by the server from the moment it sent this message, within which **some** answer must *arrive*: a `read{requestId}`, a `readAccepted`, or a `readDecline`. Servers MUST use ≥ 300. |
+| `acceptedMs` | R | Milliseconds from the same instant within which the `read` must arrive once `readAccepted` was received. Servers MUST use ≥ 1500 and ≥ `answerMs`. |
+
+The client answers with exactly one of:
+
+```json
+{ "type": "read", "id": 21, "requestId": "h3a9…", "sessionId": "…", "text": "…", "startOffset": 812, … }
+{ "type": "readDecline", "requestId": "h3a9…", "reason": "noContent", "detail": "Edit view" }
+```
+
+optionally preceded by
+
+```json
+{ "type": "readAccepted", "requestId": "h3a9…" }
+```
+
+* **Answer within budget.** "Arrive" means the complete NDJSON frame was received
+  by the server before its deadline; the server's `ok` is not part of the
+  budget. Clients SHOULD send `readAccepted` immediately on receipt whenever
+  the text is not already in hand (asynchronous extraction, a web view round
+  trip, a plugin host hop) and then the `read` as soon as it is; the server
+  then waits up to `acceptedMs`. A client whose text is cached MAY skip
+  `readAccepted` and send `read` directly.
+* `readAccepted` and `readDecline` carry no `id` and are never acknowledged
+  with `ok`. A stale or unknown `requestId` in either is ignored silently.
+  A `read` with a stale/unknown `requestId` gets `error{unknownRequest}` and
+  is not started (§5.4).
+* `readDecline.reason` ∈ `noContent` (nothing to read: no document, empty
+  text) · `busy` (the client cannot read now: a modal, mid-save) · `notFocused`
+  (this connection does not own the app's key window / focused tab; §16.4 step
+  5 lets the server try another connection of the same app) · `userDisabled`
+  (the user turned the feature off in the client) · `other`. `detail` is an
+  OPTIONAL, user-neutral string for logs; never document text.
+* Once the server has acted on a request — started the client's `read`, fallen
+  back, or dropped it — the `requestId` is dead; it is never reused.
+* After the `read` is accepted the session is ordinary: `ok`, `state{loading}`,
+  events, controls (§5.4–§5.7). `state{loading}` MAY arrive before the client
+  has finished any local bookkeeping; clients MUST NOT depend on ordering
+  between their own `read` returning and the first `state`.
 
 ## 6. Consent, identity, and multi-client policy
 
@@ -529,6 +603,7 @@ host is the identity the user approves.
 | `engineUnavailable` | no* | Speech engine cannot start (first-run download incomplete, disk full); session ends. |
 | `engineError` | no* | Synthesis failed mid-session; session ends. |
 | `slowConsumer` | yes | Outbound buffer over 4 MiB. |
+| `unknownRequest` | no | `read.requestId` names no pending hotkey request (never issued, already answered, expired, or routed to another connection). The `read` is not started. |
 | `internal` | varies | Anything else; `message` is user-presentable. |
 
 `no*` = the connection stays open but the session ends with `ended{reason:"error"}`.
@@ -542,8 +617,14 @@ host is the identity the user approves.
   capability is client-gated (`word-events`, `sentence-events`, `progress`);
   clients MUST NOT send messages for capabilities the server did not announce.
 * v1 server capabilities: `word-events`, `sentence-events`, `progress`, `seek`,
-  `rate`, `chunking`, `voices`, `panel`, `ws-transport`.
-  v1 client capabilities: `word-events`, `sentence-events`, `progress`.
+  `rate`, `chunking`, `voices`, `panel`, `ws-transport`, `hotkey-routing`
+  (Draft 2: the server routes its read hotkey to clients, §16).
+  v1 client capabilities: `word-events`, `sentence-events`, `progress`,
+  `hotkey-target` (Draft 2: this connection answers `readRequest`, §16).
+* A server MUST NOT send `readRequest` to a connection that did not announce
+  `hotkey-target`; a client MUST NOT send `readAccepted`/`readDecline` or
+  `read.requestId` to a server that did not announce `hotkey-routing`
+  (there is nothing to answer).
 * Unknown fields and unknown message types are ignored as in §3.3, so minor
   additions never break older peers.
 * Deprecation: a message or field removed in version *N+1* MUST keep working in
@@ -568,6 +649,23 @@ host is the identity the user approves.
   `playing` and `paused`; `pause` in `paused` and `resume` in `playing` are
   no-ops that still get `ok`.
 * Owner disconnect from any non-terminal state → session ends, no messages.
+
+Hotkey requests (§16) have their own small lifecycle on the server, *before* a
+session exists:
+
+```
+ hotkey ──▶ pending ──readAccepted──▶ accepted ──read{requestId}──▶ (session: loading …)
+              │  │                       │
+              │  └── read{requestId} ────┘──────────────────────────▶ (session: loading …)
+              │
+              ├── readDecline{notFocused} ──▶ pending (next connection of the same app, if any)
+              ├── readDecline{other reason} / answerMs or acceptedMs elapsed / connection closed
+              │                                                     ▶ fallback (server reads in its panel)
+              └── nothing to route to (no target, no declaration, wake failed) ▶ fallback
+```
+
+A `read{requestId}` arriving in any state other than `pending`/`accepted` for
+that id → `error{unknownRequest}`, not started.
 
 ## 13. Logging and privacy
 
@@ -634,6 +732,302 @@ client.
 Offsets check: `"Revenue reached $5B."` is 20 UTF-16 units → sentence `[0,20)`;
 `$5B` is `[16,19)`; `\n\n` occupies `[20,22)`; the second sentence starts at 22.
 
+### 15.1 Hotkey routing transcript (§16)
+
+PreviewMD is frontmost and connected at launch with `hotkey-target`; the user
+presses ⌥⇧R twice (start, then pause) and a third time after switching to an
+app without Connect support.
+
+```
+→ {"type":"hello","protocol":"univocal-connect","versions":[1],"client":{"id":"com.narnarlabs.previewmd","name":"PreviewMD","version":"0.5.0","bundleId":"com.narnarlabs.previewmd"},"capabilities":["word-events","sentence-events","hotkey-target"],"token":"uc1_9mXk…","quiet":true}
+← {"type":"welcome","version":1,"server":{…},"capabilities":["word-events","sentence-events","seek","rate","chunking","voices","panel","hotkey-routing"],"limits":{…},"grant":{…}}
+   (user presses ⌥⇧R with a PreviewMD window frontmost; Univocal resolves the peer to PreviewMD)
+← {"type":"readRequest","requestId":"h1","trigger":"hotkey","prefer":"selection","answerMs":300,"acceptedMs":1500}
+→ {"type":"readAccepted","requestId":"h1"}                       (text comes from a web view: buy time)
+→ {"type":"read","id":5,"requestId":"h1","sessionId":"S2","text":"…full document…","startOffset":812,"meta":{"title":"Q3.md"}}
+← {"type":"ok","id":5,"sessionId":"S2"}
+← {"type":"state","sessionId":"S2","state":"loading"}
+← {"type":"state","sessionId":"S2","state":"playing"}
+← {"type":"sentence","sessionId":"S2","start":812,"end":871}
+← {"type":"word","sessionId":"S2","start":812,"end":816}
+   (user presses ⌥⇧R again, PreviewMD still frontmost: same owner → toggle, no readRequest)
+← {"type":"state","sessionId":"S2","state":"paused"}
+   (user switches to an app without a declaration or connection and presses ⌥⇧R: fallback)
+← {"type":"ended","sessionId":"S2","reason":"preempted","by":"Univocal"}
+```
+
+## 16. Hotkey routing (capabilities `hotkey-routing` / `hotkey-target`)
+
+### 16.1 What it is
+
+Univocal's read hotkey (⌥⇧R by default) today captures the selection of
+whatever app is frontmost and reads it in Univocal's own panel. With hotkey
+routing, **the same keystroke reads inside the frontmost app** when that app
+is a Connect client: Univocal sends it a `readRequest` (§5.11), the client
+answers with a `read`, and the client highlights as in any Connect session.
+The user learns one shortcut; it works everywhere; the panel remains the
+fallback. A server that implements this section MUST announce
+`hotkey-routing`; a client that wants to receive requests MUST announce
+`hotkey-target` on the connection that will answer them.
+
+Everything in this section is additive. A Draft 1 client never sees a
+`readRequest` (it did not announce `hotkey-target`), and a Draft 1 server never
+receives `readAccepted`/`readDecline` (the client saw no `hotkey-routing`).
+
+### 16.2 Frontmost-app detection
+
+On the hotkey the server MUST capture `NSWorkspace.shared.frontmostApplication`
+**synchronously on the main thread, before any other work** (its
+`processIdentifier`, `bundleIdentifier`, `bundleURL`). A global hotkey
+implemented with a CGEvent tap or Carbon hotkey does not change focus, so this
+is the app the user is looking at. The capture MUST happen before the server
+captures the selection (which may simulate ⌘C) and before it shows or moves any
+window of its own. If the frontmost app is the server itself (its panel or
+settings), routing is skipped (§16.11).
+
+### 16.3 Process → app resolution
+
+The server knows each connection's **peer pid** (`getsockopt(SOL_LOCAL,
+LOCAL_PEERPID)`, or the audit token's pid). The peer is often *not* the app
+process: Electron renderers and helpers, a plugin's spawned helper, and the
+browser native-messaging host are child processes. A connection **resolves to**
+the frontmost app when either test passes, evaluated in this order:
+
+1. **Ancestry.** Walk the peer's parent chain: `pid → ppid` via
+   `proc_pidinfo(pid, PROC_PIDTBSDINFO, …).pbi_ppid` (or
+   `sysctl(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)` →
+   `kinfo_proc.kp_eproc.e_ppid`), at most 16 hops, stopping at pid 1
+   (launchd) or pid 0. If any pid on the chain (including the peer itself)
+   equals the frontmost app's pid, the connection resolves.
+2. **Bundle containment.** If the peer's executable path (`proc_pidpath`) or
+   that of any process on the chain lies inside the frontmost app's
+   `bundleURL` (path-prefix test after standardising both; Electron helpers
+   live in `Contents/Frameworks/*.app`), the connection resolves. This covers
+   a child reparented to launchd after an intermediate parent exited.
+
+Servers MUST NOT use `responsibility_get_pid_responsible_for_pid`
+(libquarantine): it is private SPI, not permitted in a notarised app and
+subject to change. The public walk above gives the same answer for every case
+this spec cares about.
+
+Security: a process cannot alter its own `ppid` or executable path, so an
+unrelated app cannot claim to be the frontmost one. Any process the frontmost
+app *spawns* does inherit its ancestry and could answer a request on its
+behalf; that is acceptable because what the user consented to is the
+**connection's own identity** (§6.2), not the frontmost app's, and the request
+goes only to connections the user already granted. The frontmost app's bundle
+id is never trusted from `hello.client.bundleId`; it comes from NSWorkspace.
+
+### 16.4 Routing algorithm
+
+On every hotkey press the server MUST run exactly these steps, in order. The
+press MUST always result in exactly one of: a toggle, one client reading, or
+the server's own fallback read. A hotkey press never does nothing silently
+(the only "nothing" is the existing beep when the fallback finds no text).
+
+1. **Capture** the frontmost app `F` (§16.2). If `F` is the server, go to 6.
+2. **Toggle check** (§16.7): if a session is active (`loading`, `playing` or
+   `paused`) and its owner connection resolves to `F`, pause it if playing or
+   loading, resume it if paused, and **stop**. Otherwise end the active
+   session with `ended{reason:"preempted", by:"Univocal"}` (whoever owns it,
+   §6.4) and continue.
+3. **Candidates:** all connections that are in the `ready` state (past
+   `welcome`), announced `hotkey-target`, and resolve to `F` (§16.3). Order
+   them by **most recent inbound message first** (any message, including
+   `pong`), ties broken by newest connection. Recommended: one Connect
+   connection per app for hotkey purposes; multiple connections are only a
+   tie-break problem, not an error.
+4. **No candidates:** if `F` is not connected, try the wake path (§16.5). If
+   `F` has no declaration or the wake fails, go to 6.
+5. **Ask** the first candidate: send `readRequest{requestId, trigger:"hotkey",
+   prefer, answerMs, acceptedMs}`; `prefer` is `"selection"` unless the user
+   set a server preference for `"document"`. Start the `answerMs` timer.
+   * `read{requestId}` arrives in time → accept it as the session (`ok`,
+     `state{loading}`…) and **stop**. The request is now dead.
+   * `readAccepted{requestId}` arrives in time → extend the deadline to
+     `acceptedMs` from the original send; then `read` in time → as above.
+   * `readDecline{reason:"notFocused"}` → remove this candidate; if another
+     candidate remains and the **total** elapsed since step 1 is under
+     `acceptedMs`, repeat step 5 with the next one (a fresh `requestId`).
+     Otherwise go to 6.
+   * Any other `readDecline`, the connection closing, or the deadline
+     elapsing → go to 6. A `read` for that id that arrives later is answered
+     `error{unknownRequest}` and not started.
+6. **Fallback:** the server's Draft 1 behaviour — read the frontmost app's
+   selection (or clipboard) in Univocal's own panel; beep if there is nothing.
+
+Pending requests MUST be dropped (and the fallback skipped) if a newer hotkey
+press arrives first: the newest press wins, and an in-flight `read` for the
+older id gets `unknownRequest`.
+
+### 16.5 Apps that are running but not connected: declaration and wake
+
+The frontmost app is running by definition. "Not connected" means it has no
+Connect connection right now (it connects lazily, or it was not granted yet).
+Such an app can still receive the hotkey if it declares support in its
+`Info.plist` (Appendix B):
+
+| Key (inside dict `UnivocalConnect`) | Type | Meaning |
+|---|---|---|
+| `Versions` | array of integer | Protocol major versions the app speaks. REQUIRED. |
+| `HotkeyTarget` | boolean | `true`: the app answers `readRequest` once connected. REQUIRED for this path. |
+| `WakeURLScheme` | string | A URL scheme registered in the same bundle's `CFBundleURLTypes`. REQUIRED for this path. |
+
+The server reads `F.bundleURL/Contents/Info.plist` (`Bundle(url:)?.infoDictionary`
+or `CFBundleCopyInfoDictionaryForURL`) at hotkey time (cache per bundle URL
+and modification date). If `UnivocalConnect` is present, `Versions` shares a
+major version with the server, `HotkeyTarget` is `true` and `WakeURLScheme` is
+set, the server:
+
+1. Creates the pending request (`requestId`) **before** waking.
+2. Opens the wake URL
+
+   ```
+   <WakeURLScheme>://univocal-connect/read?requestId=<requestId>&v=1
+   ```
+
+   with `NSWorkspace.shared.open(url, configuration:)` where
+   `configuration.activates = false` (the app is already frontmost; this
+   avoids focus churn and a Dock bounce). `v` is the protocol major version
+   the server will speak. Clients MUST ignore unknown query items. The URL
+   path is fixed to `univocal-connect/read` so apps can route it without
+   parsing anything else.
+3. Waits up to the **wake budget** (§16.6) for a connection whose `hello`
+   carries `wakeRequestId == requestId` **and** resolves to `F` (§16.3). Both
+   conditions are REQUIRED: the echo alone must not let a different process
+   claim the request. A `hello` with a `wakeRequestId` that matches no
+   pending request is treated as an ordinary `hello`.
+4. If that connection needs consent, the server prompts as usual and the
+   pending request **survives the prompt**: the wake budget is suspended
+   while `consentPending` is outstanding and resumes on `consentGranted`.
+   `consentDenied` ends the request → fallback.
+5. Right after `welcome` on that connection, the server sends the pending
+   `readRequest` and continues at §16.4 step 5 with fresh `answerMs`/`acceptedMs`
+   timers. The connection MUST have announced `hotkey-target`; if it did
+   not, → fallback.
+
+Why a URL and not an Apple Event: every candidate app already handles URLs
+(`onOpenURL` / `application(_:open:)`), the payload is one string, and
+`activates = false` removes the only side effect that argued for an Apple
+Event. A client receiving the wake URL MUST NOT open a window, change
+document, or activate itself because of it; it connects (or reuses its
+connection) and sends `hello{wakeRequestId}`. If it is not in a state to read
+it SHOULD still connect and then `readDecline` so the fallback runs promptly
+instead of after the wake budget.
+
+### 16.6 Time budgets
+
+All measured by the server. Values are minimums servers MUST allow; a server
+MAY be more generous and MUST advertise the values it uses in `readRequest`.
+
+| Phase | Budget | From | Until |
+|---|---|---|---|
+| Answer | `answerMs` ≥ 300 ms | `readRequest` sent | any of `read`, `readAccepted`, `readDecline` received |
+| Accepted | `acceptedMs` ≥ 1500 ms | `readRequest` sent | `read` received, after a `readAccepted` |
+| Wake | ≥ 1500 ms | wake URL opened | `hello{wakeRequestId}` received (consent time excluded, §16.5 step 4) |
+| Cascade | `acceptedMs` total | hotkey | last `readRequest` sent to another connection after `notFocused` |
+
+Clients SHOULD aim far below these: a pre-extracted or cached text answers in
+single-digit milliseconds; a web-view extraction answers `readAccepted` at once
+and `read` within ~100 ms.
+
+### 16.7 Toggle on repeat
+
+If the active session's owner resolves to the frontmost app (the user pressed
+the key again in the app that is being read to), the hotkey is a
+**pause/resume toggle** for that session, not a new request: `playing` or
+`loading` → paused, `paused` → playing. The owner learns of it exactly as of
+any server-side control: `state{paused}` / `state{playing}` (§6.4). A
+finished or stopped session is not active; the next press starts a new
+request. A press in a *different* app while a client session is active ends
+that session (`ended{preempted, by:"Univocal"}`) and proceeds for the new app.
+
+### 16.8 Fallback
+
+The fallback is the server's existing behaviour: capture the frontmost app's
+selection (or clipboard), read it in Univocal's panel, beep if empty. It runs
+whenever routing cannot complete: the app is not a target (no connection and
+no declaration, or connected without `hotkey-target`), wake or answer timed
+out, the client declined for any reason other than `notFocused` (or all
+`notFocused` candidates are exhausted), the connection closed mid-request, or
+the request's `read` was rejected (`invalidArgument`, `limitExceeded`…). The
+server MUST NOT run the fallback after it accepted a client's `read` for the
+same press, and MUST NOT run it twice for one press.
+
+### 16.9 Connect at launch (quiet hello)
+
+A client that announces `hotkey-target` SHOULD be connected whenever Univocal
+is running, so the common case (the app has been granted before) needs no
+wake. Rules:
+
+* At its own launch, and whenever it notices the server start (watch
+  `NSWorkspace.didLaunchApplicationNotification` for the server bundle id, or
+  the appearance of `<ConnectDir>/connect.json`), the client connects **only
+  if** a stored token exists **and** the discovery file shows a live server.
+  It MUST NOT launch the server (§4.3) and MUST NOT cause a consent prompt at
+  launch: it sends `hello{quiet:true}`. If the token is no longer valid the
+  server answers `consentDenied{reason:"quiet"}` and closes; the client
+  discards the token and relies on the wake path (§16.5) until the user acts.
+* Without a token the client does nothing at launch; the first hotkey press
+  wakes it (§16.5), the prompt appears once, and from then on it connects at
+  launch.
+* A quiet connection is otherwise ordinary: it may start reads, it receives
+  `readRequest`s. Clients SHOULD keep it open for the life of the app and
+  reconnect with the same rule after a disconnect (backoff ≥ 1 s, give up
+  after a few tries until the next server launch is observed).
+
+### 16.10 Browsers
+
+Web pages cannot be targets directly (§9.4). The native-messaging host is a
+child process of the browser, so its connection resolves to the browser by
+ancestry (§16.3). The host announces `hotkey-target` only if the extension
+told it to (a `{"type":"x-host-capabilities", "hotkeyTarget": true}` host-local
+message, never forwarded). The host forwards `readRequest` to the extension
+unchanged and forwards the extension's `readAccepted`/`readDecline`/`read`
+unchanged (apart from the `hello` rewrite already required by §9.4). The
+extension SHOULD answer `readAccepted` immediately, then pick the active tab of
+the **last focused window** (`chrome.tabs.query({active:true,
+lastFocusedWindow:true})`), ask its content script for the selection or
+article text, and send `read{requestId}`. If the active tab has no content
+script (browser-internal pages, the web store) it MUST `readDecline{reason:
+"noContent"}`. Several browser windows are the browser's problem, not the
+server's: one host connection per browser profile answers for all of them.
+
+### 16.11 Edge cases
+
+| Situation | Behaviour |
+|---|---|
+| Univocal's own panel or settings is frontmost | No routing; the server toggles its own reading as today. |
+| Several windows of the target app | The client answers for its key window (or main window if none is key). A connection that owns no key/main window (per-window connections) declines `notFocused` so the server can ask the next one. |
+| Target has a modal or sheet up | Client decides: read anyway, or `readDecline{busy}`. |
+| Consent not yet granted | Only reachable via the wake path (a connection without a grant is not `ready`). The pending request survives the prompt (§16.5 step 4); after Allow the request is delivered right after `welcome`. |
+| Univocal not running | The hotkey cannot fire. Clients never launch Univocal for hotkey purposes. |
+| Frontmost app is connected but did not announce `hotkey-target` | Not a candidate → declaration check (it may still declare and be woken; a second connection with the capability may then appear) → else fallback. |
+| Two hotkey presses in quick succession | Newest wins: the older request is dropped without fallback (§16.4). |
+| Client's `read` answers in time but is invalid (`invalidArgument`, empty text) | `error` to the client as usual; the server runs the fallback. |
+| Client answers with `preempt:false` | Ignored; a hotkey read always takes over (§5.4). |
+| Client has nothing selected and `prefer:"selection"` | Read the document from the visible position (§16.12). Decline `noContent` only if there is no document at all. |
+| Revoked while a request is pending | `unauthorized{revoked}` closes the connection → fallback. |
+
+### 16.12 What a client should read (informative)
+
+* `prefer:"selection"` and the key window has a non-empty selection → send
+  the **whole visible document text** with `startOffset` at the selection's
+  start, not just the selected substring: highlighting then continues past
+  the selection the way Univocal's panel would, and the offsets stay
+  meaningful for seek. A client that cannot map the selection into its
+  document text MAY send only the selected text.
+* No selection, or `prefer:"document"` → the document text with
+  `startOffset` at the first fully visible block (the user hears what they
+  are looking at). Clients SHOULD snap to a sentence or block start; the
+  server snaps to the containing sentence anyway (§5.4).
+* Editing surfaces where highlighting is impossible (a plain text editor
+  view with no mapping back) → `readDecline{reason:"other", detail:"…"}`; the
+  fallback reads the raw selection in the server's panel, which is the right
+  answer there.
+* The text is sent exactly as the client would for its own Read Aloud
+  command; everything in §7 applies.
+
 ## Appendix A — JSON Schema sketch (informative)
 
 ```jsonc
@@ -641,8 +1035,10 @@ Offsets check: `"Revenue reached $5B."` is 20 UTF-16 units → sentence `[0,20)`
 { "type": string, "id"?: string|integer, "sessionId"?: string }
 
 // C→S
-hello      { protocol: "univocal-connect", versions: int[], client: {id,name,version,bundleId?}, capabilities?: string[], token?: string }
-read       { sessionId, text, lang?, voice?: string|null, rate?: number, startOffset?: int, preempt?: bool, ui?: "none"|"panel", more?: bool, meta?: {title?} }
+hello      { protocol: "univocal-connect", versions: int[], client: {id,name,version,bundleId?}, capabilities?: string[], token?: string, quiet?: bool, wakeRequestId?: string }
+read       { sessionId, text, lang?, voice?: string|null, rate?: number, startOffset?: int, preempt?: bool, ui?: "none"|"panel", more?: bool, meta?: {title?}, requestId?: string }
+readAccepted { requestId }                                                     // hotkey-routing
+readDecline  { requestId, reason: "noContent"|"busy"|"notFocused"|"userDisabled"|"other", detail?: string }
 append     { sessionId, text, more: bool }
 pause | resume | stop   { sessionId }
 seek       { sessionId, offset: int }
@@ -654,7 +1050,8 @@ ping       { }
 welcome        { version: int, server: {name,version,bundleId}, capabilities: string[], limits: {maxFrameBytes, maxTextBytes, rate:{min,max}}, grant: {clientId, identity} }
 consentPending { requestId, timeoutSeconds }
 consentGranted { requestId, token }
-consentDenied  { requestId, reason: "user"|"timeout"|"disabled"|"rateLimited" }
+consentDenied  { requestId, reason: "user"|"timeout"|"disabled"|"rateLimited"|"quiet" }
+readRequest    { requestId, trigger: "hotkey", prefer: "selection"|"document", answerMs: int, acceptedMs: int }   // hotkey-routing
 ok             { id, sessionId? }
 state          { sessionId, state: "loading"|"playing"|"paused", detail?: string }
 sentence       { sessionId, start, end }
@@ -666,3 +1063,28 @@ error          { id?, sessionId?, code, message, fatal: bool, reason?, field?, v
 voices         { id?, default: string, voices: [{id,name,lang}] }
 pong           { id? }
 ```
+
+## Appendix B — Info.plist declaration for hotkey routing (§16.5)
+
+```xml
+<key>UnivocalConnect</key>
+<dict>
+    <key>Versions</key>        <array><integer>1</integer></array>
+    <key>HotkeyTarget</key>    <true/>
+    <key>WakeURLScheme</key>   <string>previewmd</string>
+</dict>
+<!-- WakeURLScheme must be registered by the same bundle: -->
+<key>CFBundleURLTypes</key>
+<array><dict>
+    <key>CFBundleURLName</key>    <string>com.narnarlabs.previewmd.url</string>
+    <key>CFBundleURLSchemes</key> <array><string>previewmd</string></array>
+    <key>LSHandlerRank</key>      <string>Owner</string>
+</dict></array>
+```
+
+Wake URL the server opens: `previewmd://univocal-connect/read?requestId=h1&v=1`
+(`NSWorkspace.shared.open(url, configuration:)` with `activates = false`).
+Validation a client can run on itself at build or test time: the dict exists,
+`Versions` is a non-empty array of integers containing 1, `HotkeyTarget` is a
+boolean, `WakeURLScheme` is a lowercase scheme that appears in one of the
+bundle's `CFBundleURLTypes.CFBundleURLSchemes`.

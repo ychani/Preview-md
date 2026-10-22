@@ -196,7 +196,111 @@ Same algorithm as PreviewMD's `read-aloud.js`:
 
 ## 9. Conformance items a TS client must satisfy
 
-From [CONFORMANCE.md](../CONFORMANCE.md) section B: C1–C12 and C14. The two
-that bite in practice: C4 (chunk long notes with `append`; Obsidian notes can be
-multi-MB when they embed base64 images — strip embeds first) and C9 (treat
+From [CONFORMANCE.md](../CONFORMANCE.md) section B: C1–C12 and C14, plus
+C15–C20, C22–C23 for hotkey routing (§10 below). The two that bite in
+practice: C4 (chunk long notes with `append`; Obsidian notes can be multi-MB
+when they embed base64 images — strip embeds first) and C9 (treat
 `ended{preempted}` as a quiet stop, not an error toast).
+
+## 10. Hotkey routing from an Obsidian plugin (SPEC §16)
+
+The user presses Univocal's ⌥⇧R with Obsidian frontmost and expects the note
+to be read **in Obsidian**. For a plugin this works only through the
+**connected** path: the plugin cannot edit Obsidian's `Info.plist`, so there is
+no `UnivocalConnect` declaration and no wake URL (SPEC §16.5 does not apply;
+C21 is n/a). Everything therefore rests on §16.9 — being connected before the
+key is pressed.
+
+### 10.1 Why the plugin resolves to Obsidian
+
+The plugin runs in Obsidian's **renderer** process (Electron's
+`Obsidian Helper (Renderer)`), and Node's `net` is available there because
+Obsidian enables Node integration. The socket's peer pid is the renderer, a
+child of the Obsidian main process; its executable lives in
+`Obsidian.app/Contents/Frameworks/Obsidian Helper (Renderer).app`. Both of the
+server's tests in §16.3 pass (ancestry **and** bundle containment), so a
+`readRequest` reaches the plugin whenever Obsidian is frontmost. No
+`bundleId` claim is involved; nothing to configure.
+
+### 10.2 Connect at launch, quietly
+
+```ts
+// main.ts
+async onload() {
+  this.client = new UnivocalClient({ client: { id: "md.obsidian.plugin.univocal", name: "Obsidian", version: manifest.version },
+                                     tokenStore, capabilities: ["word-events", "sentence-events", "hotkey-target"] });
+  this.client.on("readRequest", (req) => this.answer(req));
+  await this.client.connectIfAuthorized();           // hello{quiet:true}; no launch, no prompt
+  this.registerInterval(window.setInterval(() => this.reconnectIfServerAppeared(), 5_000));
+}
+```
+
+`connectIfAuthorized()` = token present **and** `readDiscovery()` alive →
+`hello{…, token, quiet: true}`; on `consentDenied{reason:"quiet"}` delete the
+token and stay idle. Reconnect when `connect.json` reappears (poll every 5 s;
+`fs.watch` on `<ConnectDir>` is fine on macOS too). Without a token the plugin
+does nothing until the user runs a command once (`univocal-read-aloud`), which
+connects normally and prompts in Univocal; from then on it connects at launch.
+
+### 10.3 Answering `readRequest`
+
+```ts
+async answer(req: { requestId: string; prefer: "selection" | "document"; answerMs: number; acceptedMs: number }) {
+  const leaf = this.app.workspace.getMostRecentLeaf();          // the active leaf of the focused window
+  const view = leaf?.view instanceof MarkdownView ? leaf.view : null;
+  if (!view) return this.client.decline(req.requestId, "noContent");
+  if (!document.hasFocus() && this.app.workspace.getLeavesOfType("markdown").length > 1)
+    return this.client.decline(req.requestId, "notFocused");     // a popout window owns the key window
+  this.client.accept(req.requestId);                              // reading view extraction is async-ish; buy time
+
+  if (view.getMode() === "source") {
+    const editor = view.editor;
+    const text = editor.getValue();                               // CM6 doc: offsets == positions
+    const sel = editor.getSelection();
+    const start = sel.length && req.prefer === "selection"
+      ? editor.posToOffset(editor.getCursor("from"))
+      : editor.posToOffset(editor.getCursor());                   // no selection: read from the caret
+    return this.client.read({ text, startOffset: start, title: view.file?.basename }, { requestId: req.requestId });
+  }
+  // reading view: DOM text map (§7.2)
+  const { text, offsetAtNode } = extractReadingView(view.containerEl);
+  const domSel = window.getSelection();
+  let start = 0;
+  if (req.prefer === "selection" && domSel && !domSel.isCollapsed && view.containerEl.contains(domSel.anchorNode)) {
+    start = offsetAtNode(domSel.getRangeAt(0).startContainer, domSel.getRangeAt(0).startOffset) ?? 0;
+  } else {
+    start = firstVisibleBlockOffset(view.containerEl, text);      // top of the viewport
+  }
+  return this.client.read({ text, startOffset: start, title: view.file?.basename }, { requestId: req.requestId });
+}
+```
+
+Rules this encodes (SPEC §16.12, C16–C20):
+
+* Exactly one answer per request; `accept` first because extraction may take
+  more than a few ms on long notes (`acceptedMs` is ≥ 1.5 s; aim for < 100 ms).
+* Whole document with `startOffset`, never just the selected substring, so
+  reading continues past the selection and seek offsets stay valid.
+* Source mode is readable in Obsidian (CM6 offsets are exact), unlike
+  PreviewMD's plain `TextEditor`; so no `other` decline is needed here.
+* `error{unknownRequest}` on the answering `read` (too late) → clear state, no
+  toast.
+* The toggle is server-side: a second ⌥⇧R arrives as `state{paused}` on the
+  session; the plugin just reflects it in the status bar.
+
+### 10.4 Client API additions for the TS module
+
+```ts
+interface UnivocalClientOptions { …; capabilities?: string[] }          // include "hotkey-target"
+client.connectIfAuthorized(): Promise<ServerInfo | null>                 // quiet hello; null = no token / not running / quiet-denied
+client.on("readRequest", (req: ReadRequestMessage) => void)
+client.accept(requestId: string): void                                   // readAccepted
+client.decline(requestId: string, reason: "noContent"|"busy"|"notFocused"|"userDisabled"|"other", detail?: string): void
+client.read(req: ReadOptions, opts?: { requestId?: string }): Promise<ReadingSession>   // sets read.requestId
+```
+
+VS Code: identical, except the extension host is a child of the VS Code main
+process (`Code Helper (Plugin)`), the active editor is
+`vscode.window.activeTextEditor`, and `document.getText()` offsets equal
+`document.offsetAt(position)` (UTF-16). VS Code's `Info.plist` is likewise not
+editable by an extension, so the connected path is the only one.

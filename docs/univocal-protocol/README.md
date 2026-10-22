@@ -10,7 +10,7 @@ browsers (through a native-messaging host) are the intended next ones.
 
 | File | What it is |
 |---|---|
-| [SPEC.md](SPEC.md) | The normative specification, v1: transports (Unix socket + optional loopback WebSocket), discovery, handshake, consent, sessions, events, offsets, chunking, security, versioning, transcript. |
+| [SPEC.md](SPEC.md) | The normative specification, v1 (Draft 2): transports (Unix socket + optional loopback WebSocket), discovery, handshake, consent, sessions, events, offsets, chunking, security, versioning, transcript, and **hotkey routing** (§16: Univocal's ⌥⇧R reads inside the frontmost client app). |
 | [CONFORMANCE.md](CONFORMANCE.md) | Numbered, testable MUST items for servers (S#) and clients (C#), with coverage by the mock server, the Swift SDK tests and the live-server probe. |
 | [UNIVOCAL_HANDOFF.md](UNIVOCAL_HANDOFF.md) | For the Univocal team: what changes on the server side, mapped to Univocal's files, in what order, and how to validate against this repo's tooling. |
 | [clients/typescript-outline.md](clients/typescript-outline.md) | Outline of a TypeScript client for Obsidian/VS Code/Node: UDS via `net`, NDJSON, CodeMirror/DOM range mapping. |

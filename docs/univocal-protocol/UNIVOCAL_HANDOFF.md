@@ -45,7 +45,8 @@ and function names below are from a read-only skim on 2026-10-21.
 | 1 (1–2 days) | `ConnectServer` + `ConnectConnection` with `hello`/`welcome`, `ping`, discovery file, uid check, **autogrant under `UNIVOCAL_CONNECT_AUTOGRANT=1` (dev only)**. | `univocal-mock check --dir "…/Univocal Dev/Connect"` from the PreviewMD repo: S1–S11, S19 should pass. |
 | 2 (2 days) | `ConnectSessionController` + `ConnectRouter`: `read`, events from the playback clock, controls, preemption both ways, `--connect` flag, URL scheme. | Probe S19–S33; PreviewMD app end-to-end with `UNIVOCAL_BUNDLE_ID=com.univocal.app.dev`. |
 | 3 (1–2 days) | Grants store, consent prompt, revocation, settings pane, logging audit. | Probe S12–S18 (+ manual S14/S17), log review for S34. |
-| 4 (later) | WebSocket transport, native-messaging host. | S35–S36. |
+| 3b (1–2 days) | Hotkey routing (§4a below): `HotkeyRouter`, `ProcessAncestry`, `HotkeyDeclaration`, `hello.quiet`, `wakeRequestId`, settings switch. | Unit tests in `fast`; mock CLI as a hotkey-target client; PreviewMD end-to-end (S37–S51). |
+| 4 (later) | WebSocket transport, native-messaging host (incl. hotkey forwarding, S52). | S35–S36, S52. |
 
 ## 4. Specific implementation notes
 
@@ -84,6 +85,62 @@ and function names below are from a read-only skim on 2026-10-21.
 * **Discovery file:** write `connect.json` with `pid`, remove in
   `applicationWillTerminate`; on launch, if a stale file exists, overwrite it.
 
+## 4a. Hotkey routing (SPEC §16, Draft 2) — Univocal-side steps
+
+The owner's expectation: "the same shortcut ⌥⇧R — Univocal routes the read
+aloud to the note app where the shortcut was pressed from." Today the chain is
+`Hotkey.handle` (event-tap thread, `app/EventTaps.swift` + `Univocal.swift`
+~L3357) → `DispatchQueue.main.async { onFire }` → `AppDelegate.readSelection()`
+(~L5141) → `Selection.capture()` → `read(_:)`. Routing slots in between
+`onFire` and `readSelection()`; nothing about the tap changes.
+
+| Step | Where | What |
+|---|---|---|
+| 1. Capture frontmost first | `AppDelegate`: the `hotkey.onFire` closure (~L3915) | Replace `self?.readSelection()` with `self?.hotkeyPressed()`. First statement: `let front = NSWorkspace.shared.frontmostApplication` (pid, bundleIdentifier, bundleURL) — before `Selection.capture()` simulates ⌘C and before any panel call. `voiceKeyRead()` (double-tap on the voice key) SHOULD go through the same router: it is the same user intent. |
+| 2. Router entry | new `app/Connect/HotkeyRouter.swift` | `HotkeyRouter.shared.handle(frontmost:, fallback: { readSelection() })`. Step order is SPEC §16.4 verbatim: self-check → toggle → candidates → wake → ask → fallback. Main-actor; all timers `DispatchSourceTimer` on main. Returns nothing; the outcome is logged via `Log.connect`. |
+| 3. Self-check | `HotkeyRouter` | `front.processIdentifier == getpid()` → existing behaviour (`reader?.isPlaying` → `panel.dismiss()` else `readSelection()`). |
+| 4. Toggle | `ConnectRouter.activeSession` + `ConnectSessionController` | If `activeSession` exists and `resolver.resolves(peerPid: owner.peerPid, to: front)`: `playing`/`loading` → `pause()`, `paused` → `resume()`; events flow to the owner through the existing `onState` bridge. Also handle the server's *own* panel reading here: if `reader?.isPlaying` and the frontmost app is not a target, keep today's behaviour (a new read preempts). |
+| 5. Peer pid per connection | `ConnectConnection` | At accept: `getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &len)` (also available from the audit token via `audit_token_to_pid`). Store `peerPid`; track `lastInboundAt` (updated on every frame, including `pong`) and `acceptedAt` for the candidate ordering. |
+| 6. Process → app resolver | new `app/Connect/ProcessAncestry.swift` | `static func chain(of pid: pid_t, maxHops: Int = 16) -> [pid_t]` via `proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)` → `info.pbi_ppid`, stop at 0/1; `static func executablePath(_ pid: pid_t) -> String?` via `proc_pidpath`; `static func resolves(peerPid:, toApp app: NSRunningApplication) -> Bool` = any chain pid == `app.processIdentifier` **or** any chain executable path has `app.bundleURL.standardizedFileURL.path + "/"` as prefix. Import `Darwin` (libproc is in libSystem; `<libproc.h>` needs a bridging header or a tiny C shim — the SPM-free `build.sh` can pass `-import-objc-header`). Do **not** reach for `responsibility_get_pid_responsible_for_pid`: private SPI (SPEC §16.3). |
+| 7. Candidates | `HotkeyRouter` | `ConnectServer.connections.filter { $0.phase == .ready && $0.capabilities.contains("hotkey-target") && resolver.resolves(peerPid: $0.peerPid, toApp: front) }.sorted(by: lastInboundAt desc, acceptedAt desc)`. |
+| 8. Pending-request table | `HotkeyRouter.pending: [String: PendingRequest]` | `PendingRequest { id, connectionId, frontmostPid, startedAt, phase: .asked/.accepted/.waking/.consent, deadline: DispatchSourceTimer, candidatesLeft }`. `requestId` = 16 random bytes base64url. One live request at a time: a new hotkey press cancels the old entry (timer cancelled, no fallback for it). Constants: `answerMs = 300`, `acceptedMs = 1500`, `wakeMs = 1500` — advertise the first two in `readRequest`. |
+| 9. Ask | `HotkeyRouter` + `ConnectConnection.send` | Send `readRequest{requestId, trigger:"hotkey", prefer, answerMs, acceptedMs}`; arm `answerMs`. Inbound (in `ConnectRouter`'s dispatch): `readAccepted` → re-arm to `acceptedMs - elapsed`; `readDecline{notFocused}` → next candidate if `elapsed < acceptedMs` else fallback; other `readDecline` / connection closed / timer → fallback. `read{requestId}`: if `pending[requestId]` is this connection's → mark dead, let `ConnectRouter.handleRead` run with `preempt` forced `true`; else reply `error{code:"unknownRequest"}` and do not start (SPEC §5.4). |
+| 10. Info.plist reader + wake | new `app/Connect/HotkeyDeclaration.swift` | `Bundle(url: front.bundleURL)?.infoDictionary?["UnivocalConnect"] as? [String: Any]` → `{Versions:[Int], HotkeyTarget:Bool, WakeURLScheme:String}`; cache by `(bundleURL, Info.plist mtime)`. Valid iff `Versions ∩ [1] ≠ ∅ && HotkeyTarget && scheme matches ^[a-z][a-z0-9+.-]*$`. Wake: `var c = NSWorkspace.OpenConfiguration(); c.activates = false; c.addsToRecentItems = false; NSWorkspace.shared.open(URL("\(scheme)://univocal-connect/read?requestId=\(id)&v=1"), configuration: c)`. Phase `.waking`, arm `wakeMs`. |
+| 11. Hello with `wakeRequestId` | `ConnectConnection.handleHello` → `HotkeyRouter.claim(requestId:, connection:)` | Claim succeeds only if `pending[id].phase == .waking`, the connection resolves to `pending.frontmostPid`'s app (step 6) — else treat as an ordinary hello. On claim: if consent is needed, phase `.consent` and **suspend** the wake timer; `consentGranted` → resume; `consentDenied` → fallback. After `welcome`: if `capabilities.contains("hotkey-target")` → step 9 on this connection; else fallback. |
+| 12. `hello.quiet` | `ConnectConnection.handleHello` | If consent would be needed and `quiet == true`: send `consentDenied{requestId: <fresh>, reason:"quiet"}`, close. No `ConsentPrompt` enqueue. |
+| 13. Fallback | `HotkeyRouter` | Exactly one call to the `fallback` closure per press (guard with a `done` flag on `PendingRequest`); the closure is today's `readSelection()`. Also run when the accepted `read` fails validation (`ConnectRouter.handleRead` rejects) — expose a completion from `handleRead`. |
+| 14. Native-messaging host | `univocal-nm-host` (phase 4) | Accept a host-local `{"type":"x-host-capabilities","hotkeyTarget":true}` from the extension before forwarding `hello` (add `hotkey-target` to the rewritten hello's capabilities); forward `readRequest`, `readAccepted`, `readDecline`, `read` unchanged. The host is a child of the browser, so step 6 resolves it. |
+| 15. Logging | `Log.connect` | `hotkey: front=com.narnarlabs.previewmd pid=812 candidates=1 → asked conn#3 req=h1`, `… accepted +12ms`, `… read +140ms len=5120 start=812`, `… decline notFocused`, `… timeout → fallback`, `… wake previewmd:// → hello +640ms`. Never the selection or text. |
+| 16. Settings | `ConnectSettingsPane` | One checkbox "Route the read shortcut to apps that support it" (default on; off → always fallback) and a radio "Read: selection, else document / whole document" (sets `prefer`). |
+
+**Tests.** Unit (`fast` tier): `ProcessAncestry.chain(of: getpid())` contains
+`getppid()`; a `Process()` child of the test runner resolves to the runner's
+"app" when the runner's executable URL is used as a stand-in bundle (prefix
+test); `HotkeyDeclaration` parses a fixture plist and rejects a missing scheme;
+`HotkeyRouter` state machine with an injected clock and a fake connection set:
+toggle, ask→read, ask→accepted→read, ask→accepted→timeout→fallback,
+notFocused cascade, newer press cancels older, wake→hello{wakeRequestId}→
+readRequest after welcome, quiet hello denial, `read{unknownRequest}` not
+started. Live (`models` tier): the PreviewMD repo's mock CLI is the *client*
+reference here — `swift run univocal-mock client --dir … --hotkey-target` keeps
+a connection open and answers a `readRequest` with `--text`, so a scripted ⌥⇧R
+(or the `--simulate-hotkey` debug flag you add to Univocal Dev that calls
+`hotkeyPressed(frontmost: <pid>)` without a real key event) must produce a
+session on that connection. Then PreviewMD itself: frontmost, ⌥⇧R, words
+highlight in PreviewMD; ⌥⇧R again pauses; switch to TextEdit, ⌥⇧R reads
+TextEdit's selection in the panel.
+
+**Watch-outs.** (a) `Selection.capture()` simulates ⌘C: never call it before
+step 1 or you lose the frontmost app (⌘C does not change focus, but the
+ordering is the point of SPEC §16.2). (b) The event-tap thread must stay
+untouched: all routing is on main after `onFire`. (c) The 300 ms answer timer
+runs while the user's key is possibly still down — do not beep or show the
+panel until the fallback actually runs. (d) `NSWorkspace.frontmostApplication`
+can be `nil` for a moment during app switches → treat as "no target", fallback.
+(e) A connection's `peerPid` can be reused by the OS after the process dies;
+re-check `kill(pid, 0)` only if a stale connection is suspected — normally the
+socket closes first.
+
 ## 5. Open questions for the Univocal lead
 
 1. `limits.rate`: advertise `0.25–4.0` (spec example) or the player's full
@@ -98,6 +155,11 @@ and function names below are from a read-only skim on 2026-10-21.
    least once with a Developer ID-signed PreviewMD to see the verified path.
 6. Native-messaging host: ship inside the app bundle (`Contents/Helpers`) and
    write manifests on demand, or install via the Settings pane only?
+7. Hotkey routing: should the voice-key double-tap (`voiceKeyRead`) route too?
+   Recommendation: yes — same intent, same router; only the "loop" branch
+   (replay the last dictation) stays local.
+8. `prefer` default: `"selection"` (recommended; matches today's hotkey) with
+   a Settings radio for `"document"`.
 
 ## 6. Validation against the PreviewMD repo
 
@@ -114,6 +176,15 @@ UNIVOCAL_BUNDLE_ID=com.univocal.app.dev open -a PreviewMD   # Read Aloud ⇧⌘R
 
 # 4. Compare behaviour with the reference mock whenever something is ambiguous
 swift run univocal-mock --dir /tmp/uc-ref --consent auto --verbose
+
+# 5. Hotkey routing (SPEC §16): the mock shows the expected server behaviour…
+swift run univocal-mock serve --dir /tmp/uc-ref --consent auto --verbose
+#    serve console:  frontmost com.narnarlabs.previewmd   then   hotkey
+#    → prints routed/toggled/declined/timed out/woke/fell back; compare with Univocal Dev's Log.connect lines
+# …and a hotkey-target client to point Univocal Dev at:
+swift run univocal-mock client --dir "$HOME/Library/Application Support/Univocal Dev/Connect" --hotkey-target --text "Answer text."
+#    press ⌥⇧R with the terminal frontmost: the terminal is not the client's ancestor, so Univocal must fall back;
+#    with --simulate-hotkey <pid-of-the-client> in Univocal Dev, the client must receive readRequest and read.
 ```
 
 The probe's `S#` numbering matches [CONFORMANCE.md](CONFORMANCE.md). Wire the
