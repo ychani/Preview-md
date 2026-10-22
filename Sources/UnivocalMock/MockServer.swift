@@ -54,6 +54,22 @@ public struct MockBehaviour: Sendable {
     /// Receives every log line (and consent prompts). Default: stderr when `verbose`, else nothing.
     public var logHandler: (@Sendable (String) -> Void)?
 
+    // Hotkey routing (SPEC §16, Draft 2):
+    /// Announce `hotkey-routing` in `welcome` and implement §16. `false` = a Draft 1 server:
+    /// `readAccepted`/`readDecline` are unknown types and `read.requestId` is ignored.
+    public var hotkeyRouting = true
+    /// `readRequest.answerMs` (spec minimum 300 ms; tests may go lower when timeouts are the subject).
+    public var answerDeadline: Duration = .milliseconds(300)
+    /// `readRequest.acceptedMs` (spec minimum 1500 ms), also the `notFocused` cascade budget.
+    public var acceptedDeadline: Duration = .milliseconds(1500)
+    /// Wake budget: wake URL opened → `hello{wakeRequestId}` (suspended while consent is pending).
+    public var wakeDeadline: Duration = .milliseconds(1500)
+    /// Opens the wake URL. `nil` → `NSWorkspace.open(_:configuration:)` with `activates = false`
+    /// (CLI). Tests inject a recorder. Return `false` = "could not open" → `fellBack("wakeFailed")`.
+    public var wakeOpener: (@Sendable (URL) -> Bool)?
+    /// The frontmost app at start (change it with `MockServer.setFrontmost`). `nil` = none.
+    public var frontmost: MockFrontmost?
+
     public init() {}
 }
 
@@ -108,7 +124,34 @@ public actor MockServer {
     /// Lengths/ids only — tests assert it never contains text.
     public var log: [String] { engine.sync { $0.logLines } }
 
-    /// Console commands for the CLI: `y`/`n`, `preempt`, `revoke <identity>|all`, `status`, `help`.
+    // MARK: Hotkey routing (SPEC §16)
+
+    /// What `NSWorkspace.frontmostApplication` would return at the next hotkey press.
+    public func setFrontmost(_ frontmost: MockFrontmost?) async {
+        engine.sync { $0.setFrontmost(frontmost) }
+    }
+
+    public var frontmost: MockFrontmost? { engine.sync { $0.frontmost } }
+
+    /// Runs SPEC §16.4 for one press of Univocal's read hotkey and returns when the press has
+    /// its one final outcome (up to the wake + accepted deadlines, plus consent time when a
+    /// prompt is pending). A newer press finishes an older one with `.fellBack(reason: "superseded")`.
+    public func simulateHotkey(prefer: UnivocalReadRequest.Preference = .selection) async -> MockHotkeyOutcome {
+        await withCheckedContinuation { (cont: CheckedContinuation<MockHotkeyOutcome, Never>) in
+            engine.sync { $0.startPress(prefer: prefer) { cont.resume(returning: $0) } }
+        }
+    }
+
+    /// The live `requestId` of the press in flight (asked or being woken), if any.
+    public var pendingHotkeyRequestId: String? { engine.sync { $0.press?.requestId } }
+    /// How many presses ran the server's own fallback (panel read) so far.
+    public var hotkeyFallbackCount: Int { engine.sync { $0.fallbackCount } }
+    /// Final outcomes of every press so far, oldest first.
+    public var hotkeyOutcomes: [MockHotkeyOutcome] { engine.sync { $0.outcomes } }
+
+    /// Console commands for the CLI: `y`/`n`, `preempt`, `revoke <identity>|all`, `status`,
+    /// `frontmost …`, `hotkey [selection|document]`, `help`. `hotkey` returns at once; its
+    /// outcome is logged (`hotkey #n outcome: …`) when final.
     public func handleConsoleCommand(_ line: String) async -> String {
         engine.sync { $0.console(line) }
     }
@@ -154,9 +197,17 @@ final class MockEngine: @unchecked Sendable {
     private(set) var logLines: [String] = []
     private(set) var coalescedTotal = 0
 
+    // Hotkey routing state (MockHotkey.swift).
+    var frontmost: MockFrontmost?
+    var press: HotkeyPress?
+    var nextPressNumber = 1
+    var fallbackCount = 0
+    var outcomes: [MockHotkeyOutcome] = []
+
     init(directory: URL, behaviour: MockBehaviour) {
         self.directory = directory.standardizedFileURL
         self.behaviour = behaviour
+        self.frontmost = behaviour.frontmost
         queue.setSpecific(key: queueKey, value: true)
         for (token, identity) in behaviour.knownTokens {
             let clientId = identity.split(separator: ":", maxSplits: 1).last.map(String.init) ?? identity
@@ -248,6 +299,7 @@ final class MockEngine: @unchecked Sendable {
     func stop() {
         guard running else { return }
         running = false
+        if let p = press { conclude(p, .fellBack(reason: "disconnected")) }
         if let a = active { a.finish("stopped", silently: true) }
         active = nil
         for conn in Array(connections.values) { closeConnection(conn) }
@@ -303,6 +355,10 @@ final class MockEngine: @unchecked Sendable {
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             let conn = MockConnection(id: nextConnectionId, fd: fd, maxFrameBytes: behaviour.maxFrameBytes)
             nextConnectionId += 1
+            // SPEC §16.3: the peer pid feeds process → app resolution. Unknown = never resolves.
+            var peer: pid_t = 0
+            var peerLen = socklen_t(MemoryLayout<pid_t>.size)
+            if getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &peerLen) == 0, peer > 0 { conn.peerPid = peer }
             connections[conn.id] = conn
 
             let read = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
@@ -320,7 +376,7 @@ final class MockEngine: @unchecked Sendable {
             conn.readSource = read
             conn.writeSource = write
             read.resume()
-            log("conn#\(conn.id) accepted")
+            log("conn#\(conn.id) accepted peerPid=\(conn.peerPid.map(String.init) ?? "unknown")")
         }
     }
 
@@ -368,6 +424,7 @@ final class MockEngine: @unchecked Sendable {
             fatal(conn, code: "protocolError", message: "Message without a string `type`.")
             return
         }
+        conn.lastInboundAt = DispatchTime.now().uptimeNanoseconds   // SPEC §16.4 step 3 ordering
         if behaviour.verbose { log("conn#\(conn.id) <- \(type)\(Self.describe(msg))") }
         switch conn.phase {
         case .awaitingHello:
@@ -404,6 +461,8 @@ final class MockEngine: @unchecked Sendable {
             if let id = msg["id"] { reply["id"] = id }
             send(conn, reply)
         case "read": handleRead(conn, msg)
+        case "readAccepted" where behaviour.hotkeyRouting: hotkeyAccepted(conn, msg)
+        case "readDecline" where behaviour.hotkeyRouting: hotkeyDeclined(conn, msg)
         case "append": handleAppend(conn, msg)
         case "pause", "resume", "stop", "seek", "setRate": handleControl(conn, type: type, msg: msg)
         default:
@@ -444,7 +503,9 @@ final class MockEngine: @unchecked Sendable {
         conn.identity = "unverified:\(cid)"
         conn.capabilities = Set((msg.array("capabilities") ?? []).compactMap(\.stringValue))
         let token = msg.string("token")
-        log("conn#\(conn.id) hello client=\(cid) identity=\(conn.identity) token=\(token == nil ? "absent" : "present") caps=\(conn.capabilities.sorted().joined(separator: ","))")
+        let quiet = behaviour.hotkeyRouting && msg.bool("quiet") == true
+        log("conn#\(conn.id) hello client=\(cid) identity=\(conn.identity) token=\(token == nil ? "absent" : "present") caps=\(conn.capabilities.sorted().joined(separator: ","))\(quiet ? " quiet" : "")")
+        if behaviour.hotkeyRouting, let wake = msg.string("wakeRequestId") { claimWake(conn, requestId: wake) }
 
         if let token {
             let h = Self.hash(token)
@@ -461,6 +522,14 @@ final class MockEngine: @unchecked Sendable {
                 return
             }
         }
+        if quiet {
+            // SPEC §16.9: "connect only if already authorised" — never prompt.
+            log("conn#\(conn.id) quiet hello needs consent; denied without a prompt")
+            send(conn, ["type": "consentDenied", "requestId": .string(Self.shortId()), "reason": "quiet"])
+            wakeConsentDenied(conn)
+            closeAfterFlush(conn)
+            return
+        }
         beginConsent(conn)
     }
 
@@ -472,6 +541,7 @@ final class MockEngine: @unchecked Sendable {
             consentHistory[conn.identity] = history
             log("conn#\(conn.id) consent rate-limited identity=\(conn.identity)")
             send(conn, ["type": "consentDenied", "requestId": .string(requestId), "reason": "rateLimited"])
+            wakeConsentDenied(conn)
             closeAfterFlush(conn)
             return
         }
@@ -482,6 +552,7 @@ final class MockEngine: @unchecked Sendable {
         send(conn, ["type": "consentPending", "requestId": .string(requestId), "timeoutSeconds": .int(Int(timeout.rounded()))])
         consentQueue.append(PendingConsent(connectionId: conn.id, requestId: requestId))
         log("conn#\(conn.id) consent pending request=\(requestId)")
+        wakeConsentPending(conn)
 
         switch behaviour.consent {
         case .autoGrant:
@@ -520,6 +591,7 @@ final class MockEngine: @unchecked Sendable {
             let r = reason ?? "user"
             log("conn#\(conn.id) consent denied reason=\(r)")
             send(conn, ["type": "consentDenied", "requestId": .string(requestId), "reason": .string(r)])
+            wakeConsentDenied(conn)
             closeAfterFlush(conn)
         }
     }
@@ -528,14 +600,14 @@ final class MockEngine: @unchecked Sendable {
         for p in consentQueue { resolveConsent(p.requestId, grant: grant, reason: reason) }
     }
 
-    private func welcome(_ conn: MockConnection) {
+    func welcome(_ conn: MockConnection) {
         conn.phase = .ready
         var msg: JSONObject = [
             "type": "welcome",
             "version": 1,
             "server": ["name": .string(behaviour.serverName), "version": .string(behaviour.serverVersion),
                        "bundleId": .string(behaviour.serverBundleId)],
-            "capabilities": .array(behaviour.capabilities.sorted().map { .string($0) }),
+            "capabilities": .array(advertisedCapabilities.sorted().map { .string($0) }),
             "limits": ["maxFrameBytes": .int(behaviour.maxFrameBytes), "maxTextBytes": .int(behaviour.maxTextBytes),
                        "rate": ["min": .double(behaviour.rateRange.lowerBound), "max": .double(behaviour.rateRange.upperBound)]],
             "grant": ["clientId": .string(conn.clientId), "identity": .string(conn.identity)],
@@ -546,6 +618,13 @@ final class MockEngine: @unchecked Sendable {
         if behaviour.injectUnknownMessages {
             send(conn, ["type": "x-mock-noise", "note": "clients must ignore unknown message types"])
         }
+        wokenConnectionReady(conn)
+    }
+
+    var advertisedCapabilities: Set<String> {
+        var caps = behaviour.capabilities
+        if behaviour.hotkeyRouting { caps.insert("hotkey-routing") } else { caps.remove("hotkey-routing") }
+        return caps
     }
 
     func revoke(identity: String) {
@@ -572,49 +651,64 @@ final class MockEngine: @unchecked Sendable {
     // MARK: Sessions
 
     private func handleRead(_ conn: MockConnection, _ msg: JSONObject) {
+        if behaviour.hotkeyRouting, let rid = msg["requestId"], !rid.isNull {
+            hotkeyRead(conn, msg, requestId: rid.stringValue)
+            return
+        }
+        _ = startRead(conn, msg)
+    }
+
+    /// Validates and starts a `read`. Returns the error code it answered with, or `nil`
+    /// when the session started.
+    func startRead(_ conn: MockConnection, _ msg: JSONObject) -> String? {
         let id = msg["id"]
+        func reject(_ code: String, _ message: String, sessionId: String? = nil, field: String? = nil) -> String {
+            sendError(conn, code: code, message: message, id: id, sessionId: sessionId,
+                      extra: field.map { ["field": .string($0)] } ?? [:])
+            return code
+        }
         guard let sid = msg.string("sessionId"), !sid.isEmpty else {
-            return sendError(conn, code: "invalidArgument", message: "sessionId is required.", id: id, extra: ["field": "sessionId"])
+            return reject("invalidArgument", "sessionId is required.", field: "sessionId")
         }
         guard let text = msg.string("text") else {
-            return sendError(conn, code: "invalidArgument", message: "text must be a string.", id: id, sessionId: sid, extra: ["field": "text"])
+            return reject("invalidArgument", "text must be a string.", sessionId: sid, field: "text")
         }
         if let m = msg["more"], m.boolValue == nil {
-            return sendError(conn, code: "invalidArgument", message: "more must be a boolean.", id: id, sessionId: sid, extra: ["field": "more"])
+            return reject("invalidArgument", "more must be a boolean.", sessionId: sid, field: "more")
         }
         let more = msg.bool("more") ?? false
         if text.isEmpty, !more {
-            return sendError(conn, code: "invalidArgument", message: "text is empty.", id: id, sessionId: sid, extra: ["field": "text"])
+            return reject("invalidArgument", "text is empty.", sessionId: sid, field: "text")
         }
         if let a = active, a.ownerId == conn.id, a.sessionId == sid {
-            return sendError(conn, code: "sessionExists", message: "That sessionId is live on this connection.", id: id, sessionId: sid)
+            return reject("sessionExists", "That sessionId is live on this connection.", sessionId: sid)
         }
         var rate = 1.0
         if let r = msg["rate"], !r.isNull {
             guard let d = r.doubleValue, d.isFinite, d > 0 else {
-                return sendError(conn, code: "invalidArgument", message: "rate must be a positive number.", id: id, sessionId: sid, extra: ["field": "rate"])
+                return reject("invalidArgument", "rate must be a positive number.", sessionId: sid, field: "rate")
             }
             rate = min(max(d, behaviour.rateRange.lowerBound), behaviour.rateRange.upperBound)
         }
         var startOffset = 0
         if let s = msg["startOffset"], !s.isNull {
             guard let i = s.intValue else {
-                return sendError(conn, code: "invalidArgument", message: "startOffset must be an integer.", id: id, sessionId: sid, extra: ["field": "startOffset"])
+                return reject("invalidArgument", "startOffset must be an integer.", sessionId: sid, field: "startOffset")
             }
             startOffset = i
         }
         let utf8 = text.utf8.count
         guard utf8 <= behaviour.maxTextBytes else {
-            return sendError(conn, code: "limitExceeded", message: "Text exceeds \(behaviour.maxTextBytes) bytes.", id: id, sessionId: sid)
+            return reject("limitExceeded", "Text exceeds \(behaviour.maxTextBytes) bytes.", sessionId: sid)
         }
         let utf16 = (text as NSString).length
         if startOffset < 0 || (!more && startOffset > utf16) {
-            return sendError(conn, code: "invalidOffset", message: "startOffset \(startOffset) is outside 0…\(utf16).", id: id, sessionId: sid)
+            return reject("invalidOffset", "startOffset \(startOffset) is outside 0…\(utf16).", sessionId: sid)
         }
         let preempt = msg.bool("preempt") ?? true
         if let a = active {
             guard preempt else {
-                return sendError(conn, code: "busy", message: "Univocal is reading something else.", id: id, sessionId: sid)
+                return reject("busy", "Univocal is reading something else.", sessionId: sid)
             }
             log("conn#\(conn.id) preempts session=\(a.sessionId)")
             a.finish("preempted", by: conn.clientName)
@@ -625,6 +719,7 @@ final class MockEngine: @unchecked Sendable {
         log("conn#\(conn.id) read session=\(sid) utf16=\(utf16) utf8=\(utf8) more=\(more) startOffset=\(startOffset) preempt=\(preempt) ui=\(msg.string("ui") ?? "none")")
         reading.append(text, more: more)
         reading.start(startOffset: startOffset)
+        return nil
     }
 
     private func handleAppend(_ conn: MockConnection, _ msg: JSONObject) {
@@ -740,7 +835,7 @@ final class MockEngine: @unchecked Sendable {
         send(conn, reply)
     }
 
-    private func sendError(_ conn: MockConnection, code: String, message: String, id: JSONValue? = nil,
+    func sendError(_ conn: MockConnection, code: String, message: String, id: JSONValue? = nil,
                            sessionId: String? = nil, fatal: Bool = false, extra: JSONObject = [:]) {
         var msg: JSONObject = ["type": "error", "code": .string(code), "message": .string(message), "fatal": .bool(fatal)]
         if let id { msg["id"] = id }
@@ -750,14 +845,15 @@ final class MockEngine: @unchecked Sendable {
         log("conn#\(conn.id) error code=\(code) fatal=\(fatal)\(sessionId.map { " session=\($0)" } ?? "")")
     }
 
-    private func fatal(_ conn: MockConnection, code: String, message: String, extra: JSONObject = [:]) {
+    func fatal(_ conn: MockConnection, code: String, message: String, extra: JSONObject = [:]) {
         sendError(conn, code: code, message: message, fatal: true, extra: extra)
         closeAfterFlush(conn)
     }
 
-    private func closeAfterFlush(_ conn: MockConnection) {
+    func closeAfterFlush(_ conn: MockConnection) {
         guard !conn.closed, !conn.closing else { return }
         conn.closing = true
+        hotkeyConnectionGone(conn)
         conn.readSource?.cancel()
         conn.readSource = nil
         if let a = active, a.ownerId == conn.id { a.finish("error", silently: true) }
@@ -771,7 +867,7 @@ final class MockEngine: @unchecked Sendable {
 
     // MARK: Outbound with coalescing (SPEC §8)
 
-    private func send(_ conn: MockConnection, _ msg: JSONObject, coalesceKey: String? = nil) {
+    func send(_ conn: MockConnection, _ msg: JSONObject, coalesceKey: String? = nil) {
         guard !conn.closed, let data = try? UnivocalWire.frame(msg) else { return }
         if let key = coalesceKey, conn.unsentBytes > behaviour.slowConsumerThresholds.coalesce {
             coalescedTotal += conn.dropQueued(key: key)
@@ -811,6 +907,7 @@ final class MockEngine: @unchecked Sendable {
         guard !conn.closed else { return }
         conn.closed = true
         connections[conn.id] = nil
+        hotkeyConnectionGone(conn)
         if let a = active, a.ownerId == conn.id { a.finish("error", silently: true) }   // owner gone: ends silently
         consentQueue.removeAll { $0.connectionId == conn.id }
         conn.cancelSources()
@@ -840,11 +937,23 @@ final class MockEngine: @unchecked Sendable {
             revoke(identity: who == "all" ? "*" : who)
             return "revoked \(who)"
         case "status":
-            let ids = connections.values.sorted { $0.id < $1.id }.map { "conn#\($0.id) \($0.identity.isEmpty ? "(no hello)" : $0.identity)" }
+            let ids = connections.values.sorted { $0.id < $1.id }.map { c -> String in
+                var d = "conn#\(c.id) \(c.identity.isEmpty ? "(no hello)" : c.identity) pid=\(c.peerPid.map(String.init) ?? "?")"
+                if c.capabilities.contains("hotkey-target") { d += " hotkey-target" }
+                if let f = frontmost { d += resolves(c, f) ? " resolves-to-frontmost" : " not-frontmost" }
+                return d
+            }
             let session = active.map { "session=\($0.sessionId) owner=conn#\($0.ownerId) paused=\($0.paused)" } ?? "no active session"
-            return "connections: \(ids.isEmpty ? "none" : ids.joined(separator: ", ")); \(session); pending consent: \(consentQueue.count); grants: \(grants.count)"
+            let front = frontmost.map { "frontmost: \($0)" } ?? "frontmost: none"
+            return "connections: \(ids.isEmpty ? "none" : ids.joined(separator: ", ")); \(session); \(front); pending consent: \(consentQueue.count); grants: \(grants.count)"
+        case "frontmost":
+            return consoleFrontmost(parts.count > 1 ? parts[1] : "")
+        case "hotkey":
+            return consoleHotkey(parts.count > 1 ? parts[1] : "")
         case "", "help", "?":
-            return "commands: y | n (answer consent), preempt, revoke <identity>|all, status, help"
+            return "commands: y | n (answer consent), preempt, revoke <identity>|all, status, "
+                + "frontmost <bundle-id> [pid] [bundle-path] | frontmost <pid> | frontmost self | frontmost none, "
+                + "hotkey [selection|document], help"
         default:
             return "unknown command \"\(parts.first ?? "")\" — try help"
         }
@@ -936,6 +1045,10 @@ final class MockConnection: @unchecked Sendable {
     var clientName = ""
     var identity = ""
     var capabilities: Set<String> = []
+    /// `LOCAL_PEERPID` at accept time (SPEC §16.3); `nil` if unavailable.
+    var peerPid: pid_t?
+    /// Uptime (ns) of the last inbound frame of any type (SPEC §16.4 step 3).
+    var lastInboundAt: UInt64 = 0
 
     // Outbound queue: frames[head...] are unsent; `offset` bytes of frames[head] are written.
     private var frames: [Frame] = []
