@@ -75,7 +75,7 @@ Legend: ✓ covered · ◐ partial · — not covered · manual.
 | S48 | Matches the woken connection by `hello.wakeRequestId` **and** process resolution; a `wakeRequestId` matching nothing is an ordinary hello; delivers the pending `readRequest` right after `welcome`. | 16.5 | ✓ | ✓ | — |
 | S49 | Wake budget ≥ 1.5 s, suspended while `consentPending` is outstanding; `consentDenied` → fallback. | 16.5, 16.6 | ✓ | ✓ (`.askOnStdin` + `grantPending()`) | manual |
 | S50 | `hello{quiet:true}` needing consent → `consentDenied{reason:"quiet"}` then close; no prompt shown. | 5.1, 5.3, 16.9 | ✓ | ✓ | ✓ (probe sends quiet hello without a token) |
-| S51 | Frontmost == server itself → no routing, own toggle. | 16.11 | ✓ (frontmost pid == mock pid) | ✓ | manual |
+| S51 | Frontmost == server itself → no routing, own toggle. | 16.11 | ✓ (frontmost bundle id == server bundle id; console `frontmost self`) | ✓ | manual |
 | S52 | Native-messaging host (if shipped) announces `hotkey-target` only when the extension asked; forwards `readRequest`, `readAccepted`, `readDecline`, `read{requestId}` unchanged. | 16.10 | — | — | manual |
 | S53 | Logs for hotkey routing contain pids, bundle ids, request ids, reasons and timings only — never selection or document text. | 13, 16 | ✓ (log scan in tests) | ✓ | manual (log review) |
 
@@ -130,7 +130,10 @@ UNIVOCAL_CONNECT_DIR=/tmp/uc-qa open -a PreviewMD                  # app against
 #   frontmost com.narnarlabs.previewmd            # or: frontmost <pid>
 #   hotkey                                        # = hotkey selection
 #   hotkey document
-# prints the outcome: toggled | routed <client> | declined <client> <reason> | timed out | woke <url> | fell back <why>
+# prints the outcome: toggled paused|playing | routed <session> <client> | fell back <why>
+#   <why> ∈ noTarget | noDeclaration | wakeFailed | wakeTimeout | consentDenied | answerTimeout |
+#           acceptedTimeout | declined:<reason> | readRejected:<code> | superseded | disconnected
+#   a wake is logged separately as `hotkey #n woke <url>`
 
 # Against a live Univocal (dev build), from the PreviewMD repo
 swift run univocal-mock check --dir "$HOME/Library/Application Support/Univocal Dev/Connect"

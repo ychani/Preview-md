@@ -826,6 +826,8 @@ the server's own fallback read. A hotkey press never does nothing silently
 (the only "nothing" is the existing beep when the fallback finds no text).
 
 1. **Capture** the frontmost app `F` (§16.2). If `F` is the server, go to 6.
+   If there is no frontmost app, end any active session (`preempted`, `by:"Univocal"`)
+   and go to 6.
 2. **Toggle check** (§16.7): if a session is active (`loading`, `playing` or
    `paused`) and its owner connection resolves to `F`, pause it if playing or
    loading, resume it if paused, and **stop**. Otherwise end the active
