@@ -6,7 +6,7 @@ import UnivocalClient
 @main
 struct MdReaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState.shared
 
     private func recentLabel(for url: URL) -> String {
         let name = url.lastPathComponent
@@ -187,14 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// enough to span SwiftUI's per-URL callbacks, short enough to be
     /// imperceptible on a single open.
     private static let coalesceWindow: TimeInterval = 0.15
-    /// A wake that arrives before `appState` is wired is kept this long;
-    /// Univocal gives up on it after its wake budget (≥ 1.5 s) anyway.
-    private static let wakeHoldWindow: TimeInterval = 1.5
 
     private(set) var pendingURLs: [URL] = []
     private var flushScheduled = false
     private var _appState: AppState?
-    private var pendingWake: (requestId: String, at: Date)?
 
     /// Where wake request ids go; tests replace it.
     var wakeHandler: ((String) -> Void)?
@@ -204,10 +200,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         set {
             _appState = newValue
             if newValue != nil, !pendingURLs.isEmpty { scheduleFlush() }
-            if newValue != nil, let wake = pendingWake {
-                pendingWake = nil
-                if Date().timeIntervalSince(wake.at) < Self.wakeHoldWindow { deliverWake(wake.requestId) }
-            }
         }
     }
 
@@ -246,10 +238,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func deliverWake(_ requestId: String) {
         if let wakeHandler {
             wakeHandler(requestId)
-        } else if let state = _appState {
-            MainActor.assumeIsolated { state.readAloud.handleWakeURL(requestId: requestId) }
         } else {
-            pendingWake = (requestId, Date())
+            // Not `_appState`: that arrives with the first window's
+            // `onAppear`, and PreviewMD can be frontmost with no window open.
+            // A wake needs only Read Aloud, which lives as long as the app.
+            MainActor.assumeIsolated { AppState.shared.readAloud.handleWakeURL(requestId: requestId) }
         }
     }
 

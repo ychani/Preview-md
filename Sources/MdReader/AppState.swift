@@ -41,6 +41,11 @@ struct RootState: Identifiable, Equatable {
 
 @MainActor
 final class AppState: ObservableObject {
+    /// The app's one AppState (`MdReaderApp`'s `@StateObject`). The app
+    /// delegate reaches it for Univocal wakes even when no window has
+    /// appeared to hand it over.
+    static let shared = AppState()
+
     @Published var files: [MarkdownFile] = []
     @Published var selectedFile: MarkdownFile? {
         didSet {
