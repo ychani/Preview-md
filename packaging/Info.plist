@@ -35,6 +35,19 @@
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>0.4.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.narnarlabs.previewmd.url</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>previewmd</string>
+			</array>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+		</dict>
+	</array>
 	<key>CFBundleVersion</key>
 	<string>0</string>
 	<key>LSApplicationCategoryType</key>
@@ -72,5 +85,16 @@
 			</dict>
 		</dict>
 	</array>
+	<key>UnivocalConnect</key>
+	<dict>
+		<key>HotkeyTarget</key>
+		<true/>
+		<key>Versions</key>
+		<array>
+			<integer>1</integer>
+		</array>
+		<key>WakeURLScheme</key>
+		<string>previewmd</string>
+	</dict>
 </dict>
 </plist>

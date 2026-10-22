@@ -12,9 +12,18 @@ import WebKit
 /// page. Reading stops on a document switch, on Edit view, and on ⇧⌘.; a
 /// document edit mid-session restarts at the re-mapped current sentence.
 ///
-/// Inert until the user acts: nothing launches Univocal or connects to it
-/// before a click, and without Univocal installed the only affordance is
-/// "Get Univocal".
+/// Nothing launches Univocal before a click, and without Univocal installed
+/// the only affordance is "Get Univocal".
+///
+/// Univocal's own read hotkey (⌥⇧R, SPEC §16): PreviewMD announces
+/// `hotkey-target` and connects quietly at launch (and whenever Univocal
+/// starts) if the user allowed it before — never prompting, never launching
+/// Univocal. When the hotkey is pressed with PreviewMD frontmost, Univocal
+/// sends a `readRequest` and PreviewMD reads in place
+/// (`handleReadRequest(_:)`): in the preview from the selection, else from
+/// the first visible block; in the editor (Edit view, or Split view with the
+/// editor focused) the raw text from the selection or caret, highlighted in
+/// the editor. A second press pauses/resumes — Univocal does that itself.
 @MainActor
 final class ReadAloudController: ObservableObject {
     enum Status: Equatable {
@@ -55,6 +64,25 @@ final class ReadAloudController: ObservableObject {
     /// The document's display name, sent to Univocal as `meta.title`.
     var documentTitle: () -> String? = { nil }
 
+    /// What Univocal's hotkey would read right now (decided by `AppState`
+    /// from the selected document, the key window and the view mode).
+    enum HotkeySource {
+        /// No document, or it failed to load → `noContent`.
+        case noDocument
+        /// No document window (only a panel, or none) → `notFocused`.
+        case noWindow
+        /// The document is still being read from disk → `busy`.
+        case loading
+        /// Read the preview.
+        case preview
+        /// Read the editor; nil when the editor is in front but its text
+        /// view can't be found → `other`/"editView" (Univocal reads the raw
+        /// selection in its panel).
+        case editor((any ReadAloudEditorSurface)?)
+    }
+
+    var hotkeySource: () -> HotkeySource = { .noDocument }
+
     let bridge: ReadAloudWebBridging
     private let backend: ReadAloudBackend
     private let openURL: (URL) -> Void
@@ -81,8 +109,24 @@ final class ReadAloudController: ObservableObject {
     private var serverCapabilities: Set<String>?
     nonisolated(unsafe) private var activationObserver: NSObjectProtocol?
 
+    /// The hotkey request the current attempt answers (until it ends).
+    private var hotkeyRequest: UnivocalReadRequest?
+    /// Where the pending `requestText` should start (hotkey reads).
+    private var pendingPrefer: ReadAloudBridge.StartPreference?
+    /// `readAccepted` in flight; the answering `read` goes out after it.
+    private var acceptTask: Task<Void, Never>?
+    /// The editor being read (hotkey reads in Edit/Split view); nil while
+    /// reading the preview.
+    private var editor: (any ReadAloudEditorSurface)?
+    nonisolated(unsafe) private var hotkeyTasks: [Task<Void, Never>] = []
+
     /// How long the page may take to answer `requestText`.
     static let textTimeout: Duration = .seconds(5)
+    /// A hotkey read is declined (`busy`) when the page's text is not in
+    /// hand this long before Univocal's `acceptedMs` deadline.
+    static let hotkeyMargin: Duration = .milliseconds(150)
+    /// Univocal's default `limits.maxTextBytes`.
+    static let maxTextBytes = 8 * 1024 * 1024
 
     init(
         backend: ReadAloudBackend = UnivocalBackend(),
@@ -103,6 +147,7 @@ final class ReadAloudController: ObservableObject {
 
     deinit {
         if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
+        for task in hotkeyTasks { task.cancel() }
     }
 
     // MARK: - Actions
@@ -147,6 +192,12 @@ final class ReadAloudController: ObservableObject {
         stop()
     }
 
+    /// The view mode changed. Edit view has no preview to highlight, and
+    /// the editor an editor reading highlights is replaced in any switch.
+    func viewModeDidChange(toEdit: Bool) {
+        if toEdit || editor != nil { stop() }
+    }
+
     func seek(toUTF16Offset offset: Int) {
         guard let session, status == .playing || status == .paused else { return }
         if let serverCapabilities, !serverCapabilities.contains("seek") { return }
@@ -169,6 +220,145 @@ final class ReadAloudController: ObservableObject {
         }
     }
 
+    // MARK: - Univocal's read hotkey (SPEC §16)
+
+    /// Starts answering Univocal's hotkey: consumes `readRequests()` and
+    /// keeps a quiet connection whenever Univocal runs (SPEC §16.9). Once.
+    func startHotkeyIntegration() {
+        guard hotkeyTasks.isEmpty else { return }
+        let requests = backend.readRequests()
+        hotkeyTasks.append(Task { [weak self] in
+            for await request in requests {
+                guard let self else { return }
+                self.handleReadRequest(request)
+            }
+        })
+        let backend = backend
+        let appearances = backend.serverAppearances()
+        hotkeyTasks.append(Task {
+            // Quiet: only with a stored grant and Univocal already running.
+            _ = try? await backend.connectIfAuthorized()
+            for await _ in appearances {
+                _ = try? await backend.connectIfAuthorized()
+            }
+        })
+        let states = backend.connectionStates()
+        hotkeyTasks.append(Task {
+            // Lost the connection while Univocal keeps running: a few
+            // quiet retries; after that, wait for its next launch.
+            var wasConnected = false
+            for await state in states {
+                if case .connected = state {
+                    wasConnected = true
+                } else if state == .disconnected, wasConnected {
+                    wasConnected = false
+                    for delay in [1, 2, 4] {
+                        try? await Task.sleep(for: .seconds(delay))
+                        if Task.isCancelled { return }
+                        if (try? await backend.connectIfAuthorized()) == true { break }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Univocal opened PreviewMD's wake URL (SPEC §16.5): connect and name
+    /// the request, which then arrives on `readRequests()`. No window,
+    /// document or activation changes.
+    func handleWakeURL(requestId: String) {
+        Task { [backend] in try? await backend.connectForWake(requestId: requestId) }
+    }
+
+    /// Answers one hotkey request: a `read` from the preview or the editor,
+    /// or a `readDecline` so Univocal reads in its own panel.
+    func handleReadRequest(_ request: UnivocalReadRequest) {
+        let source = hotkeySource()
+        switch source {
+        case .noDocument:
+            return decline(request, .noContent, nil)
+        case .noWindow:
+            return decline(request, .notFocused, nil)
+        case .loading:
+            return decline(request, .busy, "loading")
+        case .editor(nil):
+            return decline(request, .other, "editView")
+        case .preview, .editor:
+            break
+        }
+        // A reading the user started here is still starting (waiting for
+        // the page or for approval in Univocal). An older hotkey attempt is
+        // simply replaced: Univocal dropped it (newest press wins).
+        if session == nil, startTask != nil || pendingRequest != nil, hotkeyRequest == nil {
+            return decline(request, .busy, "starting")
+        }
+        // A session of ours that is still running was preempted by
+        // Univocal before it asked (its `ended` follows); end it here.
+        switch source {
+        case .editor(let surface?):
+            answerFromEditor(request, surface)
+        case .preview:
+            answerFromPreview(request)
+        default:
+            break
+        }
+    }
+
+    private func answerFromPreview(_ request: UnivocalReadRequest) {
+        guard bridge.webView != nil else { return decline(request, .busy, "noPreview") }
+        endSession()
+        requestCounter &+= 1
+        let textRequest = requestCounter
+        pendingRequest = textRequest
+        pendingPrefer = request.prefer == .document ? .document : .selection
+        hotkeyRequest = request
+        status = .starting(nil)
+        observeConnection()
+        // The page answers asynchronously: buy time first (SPEC §16.6).
+        acceptTask = Task { [backend] in try? await backend.accept(request) }
+        bridge.requestText(request: textRequest, prefer: pendingPrefer)
+        let token = sessionToken
+        Task { [weak self] in
+            try? await Task.sleep(until: request.acceptedDeadline - Self.hotkeyMargin, clock: .continuous)
+            guard let self, token == self.sessionToken, self.pendingRequest == textRequest else { return }
+            self.abandon(request, .busy, "textTimeout")
+        }
+    }
+
+    /// The editor's raw text, from the selection's start (or the caret)
+    /// for `prefer: selection`, from the first visible line for
+    /// `prefer: document`. The text is in hand, so no `readAccepted`.
+    private func answerFromEditor(_ request: UnivocalReadRequest, _ surface: any ReadAloudEditorSurface) {
+        let text = surface.text
+        guard text.contains(where: { !$0.isWhitespace }) else { return decline(request, .noContent, "emptyEditor") }
+        guard text.utf8.count <= Self.maxTextBytes else { return decline(request, .other, "tooLarge") }
+        endSession()
+        let startOffset = request.prefer == .selection
+            ? surface.selectedRange.location
+            : surface.visibleStartOffset()
+        editor = surface
+        hotkeyRequest = request
+        let token = sessionToken
+        // Any edit ends the reading: its offsets no longer match the text.
+        surface.onInvalidate = { [weak self] in
+            guard let self, token == self.sessionToken else { return }
+            self.stop()
+        }
+        status = .starting(nil)
+        begin(text: text, startOffset: min(startOffset, text.utf16.count), generation: nil, replacing: nil)
+    }
+
+    /// Gives up on a hotkey request: Univocal reads in its panel instead.
+    private func abandon(_ request: UnivocalReadRequest, _ reason: UnivocalDeclineReason, _ detail: String?) {
+        endSession()
+        status = .idle
+        refreshAvailability()
+        decline(request, reason, detail)
+    }
+
+    private func decline(_ request: UnivocalReadRequest, _ reason: UnivocalDeclineReason, _ detail: String?) {
+        Task { [backend] in try? await backend.decline(request, reason: reason, detail: detail) }
+    }
+
     // MARK: - Page messages
 
     func handle(_ message: ReadAloudBridge.Message, from webView: WKWebView?) {
@@ -180,17 +370,18 @@ final class ReadAloudController: ObservableObject {
             highlightMode = mode
             textSource = nil
             if let request = pendingRequest {
-                bridge.requestText(request: request)
-            } else if session != nil, let text = sessionText {
+                bridge.requestText(request: request, prefer: pendingPrefer)
+            } else if session != nil, editor == nil, let text = sessionText {
                 bridge.reattach(text: text, word: currentWord, sentence: currentSentence)
             }
-        case .text(let text, let generation, let request):
+        case .text(let text, let generation, let request, let startOffset):
             guard request == pendingRequest else { return }
             pendingRequest = nil
             textSource = webView.map(ObjectIdentifier.init)
-            begin(text: text, startOffset: 0, generation: generation, replacing: nil)
+            begin(text: text, startOffset: hotkeyRequest == nil ? 0 : startOffset,
+                  generation: generation, replacing: nil)
         case .textChanged(let text, let startOffset, let generation):
-            guard sessionText != nil else { return }
+            guard sessionText != nil, editor == nil else { return }
             textSource = webView.map(ObjectIdentifier.init)
             if status == .paused {
                 pendingRestart = (text, startOffset, generation)
@@ -200,8 +391,14 @@ final class ReadAloudController: ObservableObject {
         case .seek(let offset):
             seek(toUTF16Offset: offset)
         case .error(let code, let request):
-            guard (request != nil && request == pendingRequest) || (request == nil && sessionText != nil)
+            guard (request != nil && request == pendingRequest)
+                    || (request == nil && sessionText != nil && editor == nil)
             else { return }
+            if request != nil, let hotkey = hotkeyRequest {
+                // Nothing to read here: Univocal falls back to its panel.
+                abandon(hotkey, code == "noContent" ? .noContent : .other, code == "noContent" ? nil : code)
+                return
+            }
             let old = session
             endSession()
             if let old { Task { try? await old.stop() } }
@@ -240,7 +437,9 @@ final class ReadAloudController: ObservableObject {
     }
 
     /// Starts a session on `text`; with `replacing`, stops that one first.
-    private func begin(text: String, startOffset: Int, generation: Int,
+    /// While `hotkeyRequest` is set the session answers it. `generation` is
+    /// the page's stamp for preview text (nil for the editor).
+    private func begin(text: String, startOffset: Int, generation: Int?,
                        replacing old: (any ReadAloudSession)?) {
         let token = sessionToken
         var request = ReadRequest(text: text)
@@ -252,15 +451,30 @@ final class ReadAloudController: ObservableObject {
         currentSentence = nil
         if case .starting = status {} else { status = .starting(nil) }
         observeConnection()
+        let hotkey = hotkeyRequest
+        let accepted = acceptTask
         startTask = Task { [weak self, backend] in
             if let old { try? await old.stop() }
             do {
-                let session = try await backend.startReading(request)
+                let session: any ReadAloudSession
+                if let hotkey {
+                    // `readAccepted` must reach Univocal before the `read`.
+                    await accepted?.value
+                    session = try await backend.startReading(request, answering: hotkey)
+                } else {
+                    session = try await backend.startReading(request)
+                }
                 guard let self, token == self.sessionToken else {
                     try? await session.stop()
                     return
                 }
                 self.attach(session, token: token)
+            } catch let error as UnivocalError where hotkey != nil && error.code == .unknownRequest {
+                // Too late: Univocal already read in its panel. Not a failure.
+                guard let self, token == self.sessionToken else { return }
+                self.endSession()
+                self.status = .idle
+                self.refreshAvailability()
             } catch {
                 guard let self, token == self.sessionToken else { return }
                 self.fail(with: error)
@@ -271,7 +485,9 @@ final class ReadAloudController: ObservableObject {
     private func attach(_ session: any ReadAloudSession, token: Int) {
         self.session = session
         startTask = nil
-        if let generation = sessionGeneration, let webView = bridge.webView,
+        if editor != nil {
+            // Highlights go to the editor; the page stays inactive.
+        } else if let generation = sessionGeneration, let webView = bridge.webView,
            ObjectIdentifier(webView) == textSource {
             bridge.activate(generation: generation)
         } else if let text = sessionText {
@@ -299,16 +515,24 @@ final class ReadAloudController: ObservableObject {
         case .sentence(let range):
             currentSentence = range
             currentWord = nil
-            bridge.apply(word: nil, sentence: range)
+            paint(word: nil, sentence: range)
         case .word(let range):
             currentWord = range
-            bridge.apply(word: range, sentence: currentSentence)
+            paint(word: range, sentence: currentSentence)
         case .progress, .rate:
             break
         case .error(let error):
             lastSessionError = error
         case .ended(let reason, _):
             finish(reason)
+        }
+    }
+
+    private func paint(word: Range<Int>?, sentence: Range<Int>?) {
+        if let editor {
+            editor.paint(word: word, sentence: sentence)
+        } else {
+            bridge.apply(word: word, sentence: sentence)
         }
     }
 
@@ -371,6 +595,14 @@ final class ReadAloudController: ObservableObject {
         lastSessionError = nil
         currentWord = nil
         currentSentence = nil
+        hotkeyRequest = nil
+        pendingPrefer = nil
+        acceptTask = nil
+        if let editor {
+            editor.onInvalidate = nil
+            editor.clear()
+            self.editor = nil
+        }
         bridge.deactivate()
     }
 

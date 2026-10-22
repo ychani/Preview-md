@@ -126,6 +126,32 @@ var PreviewMDReadAloudCore = (function () {
     return Math.max(0, Math.round(scrollY + centre - viewportHeight * 0.4));
   }
 
+  // Hotkey reads start at the first fully visible block. `tops`/`bottoms`
+  // are the viewport-relative edges of candidate blocks in document order:
+  // the first whose top edge is on screen, else the first still partly on
+  // screen (one block taller than the viewport), else -1.
+  function firstVisibleIndex(tops, bottoms, viewportHeight) {
+    for (var i = 0; i < tops.length; i++) {
+      if (tops[i] >= 0 && tops[i] < viewportHeight) return i;
+    }
+    for (var j = 0; j < bottoms.length; j++) {
+      if (bottoms[j] > 0 && tops[j] < viewportHeight) return j;
+    }
+    return -1;
+  }
+
+  // The smallest i in [0, n) with pred(i) true, for a predicate that is
+  // false then true over the range; n when it is never true.
+  function lowerBound(n, pred) {
+    var lo = 0;
+    var hi = n;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (pred(mid)) hi = mid; else lo = mid + 1;
+    }
+    return lo;
+  }
+
   // True when the UTF-8 encoding of `text` is longer than `limit` bytes.
   // Cheap bounds first: a UTF-16 unit is 1–3 UTF-8 bytes.
   function exceedsUTF8(text, limit) {
@@ -150,6 +176,8 @@ var PreviewMDReadAloudCore = (function () {
     entryIndexAt: entryIndexAt,
     slicesFor: slicesFor,
     followScrollTop: followScrollTop,
+    firstVisibleIndex: firstVisibleIndex,
+    lowerBound: lowerBound,
     exceedsUTF8: exceedsUTF8
   };
 })();

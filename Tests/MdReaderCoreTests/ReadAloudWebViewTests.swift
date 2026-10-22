@@ -99,12 +99,20 @@ final class ReadAloudWebViewTests: XCTestCase {
     }
 
     private func requestText(_ request: Int = 1) throws -> (text: String, generation: Int) {
-        try evaluate(ReadAloudBridge.requestTextJS(request: request))
+        let reply = try requestText(request, prefer: nil)
+        XCTAssertEqual(reply.startOffset, 0, "the app's own command starts at the top")
+        return (reply.text, reply.generation)
+    }
+
+    private func requestText(
+        _ request: Int, prefer: ReadAloudBridge.StartPreference?
+    ) throws -> (text: String, generation: Int, startOffset: Int) {
+        try evaluate(ReadAloudBridge.requestTextJS(request: request, prefer: prefer))
         let message = try waitForMessage {
-            if case .text(_, _, request) = $0 { return true } else { return false }
+            if case .text(_, _, request, _) = $0 { return true } else { return false }
         }
-        guard case .text(let text, let generation, _) = message else { throw NoMessage() }
-        return (text, generation)
+        guard case .text(let text, let generation, _, let startOffset) = message else { throw NoMessage() }
+        return (text, generation, startOffset)
     }
 
     /// The text painted by a highlight, one string per range (CSS mode) or
@@ -428,6 +436,121 @@ final class ReadAloudWebViewTests: XCTestCase {
         try evaluate(ReadAloudBridge.applyJS(word: try range(of: "number 110 ", in: text), sentence: nil))
         settle()
         XCTAssertEqual(try scrollY(), followed, accuracy: 1)
+    }
+
+    // MARK: Hotkey start offset (SPEC §16.12)
+
+    /// Selects `needle` (or `length` characters from its start) in the first
+    /// document text node that contains it.
+    private func select(_ needle: String, length: Int? = nil) throws {
+        let literal = try XCTUnwrap(MarkdownRenderBridge.jsonArrayLiteral(needle))
+        try evaluate("""
+            (function () {
+              var needle = (\(literal))[0];
+              var w = document.createTreeWalker(document.getElementById('previewmd-root'), NodeFilter.SHOW_TEXT);
+              for (var n = w.nextNode(); n; n = w.nextNode()) {
+                var i = n.data.indexOf(needle);
+                if (i >= 0) {
+                  var end = Math.min(n.data.length, i + \(length ?? needle.utf16.count));
+                  window.getSelection().setBaseAndExtent(n, i, n, end);
+                  return 0;
+                }
+              }
+              throw new Error('needle not found');
+            })()
+            """)
+    }
+
+    func testHotkeyStartsAtTheSelection() throws {
+        try loadShell()
+        try render("First paragraph here.\n\nSecond **para**graph with words.\n\nThird one.")
+        try select("graph with")
+        let reply = try requestText(1, prefer: .selection)
+        XCTAssertEqual(reply.text, "First paragraph here.\n\nSecond paragraph with words.\n\nThird one.\n\n")
+        XCTAssertEqual(reply.startOffset, try range(of: "graph with", in: reply.text).lowerBound)
+
+        // `document` ignores the selection: the top block is visible.
+        XCTAssertEqual(try requestText(2, prefer: .document).startOffset, 0)
+    }
+
+    func testHotkeySelectionOnElementBoundariesAndSkippedBlocks() throws {
+        try loadShell()
+        try render("Intro text.\n\n```\nlet code = 1\n```\n\nAfter the code.\n\n- item one\n- item two")
+        // A selection that starts inside a code block (not read) starts at
+        // the next text that is.
+        try evaluate("""
+            (function () {
+              var pre = document.querySelector('#previewmd-root pre');
+              var t = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT).nextNode();
+              window.getSelection().setBaseAndExtent(t, 0, t, 1);
+              return 0;
+            })()
+            """)
+        var reply = try requestText(1, prefer: .selection)
+        XCTAssertEqual(reply.startOffset, try range(of: "After the code.", in: reply.text).lowerBound)
+
+        // A selection anchored on an element (the second list item).
+        try evaluate("""
+            (function () {
+              var li = document.querySelectorAll('#previewmd-root li')[1];
+              var r = document.createRange(); r.selectNodeContents(li);
+              var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+              return 0;
+            })()
+            """)
+        reply = try requestText(2, prefer: .selection)
+        XCTAssertEqual(reply.startOffset, try range(of: "item two", in: reply.text).lowerBound)
+    }
+
+    func testHotkeyWithoutSelectionStartsAtTheFirstFullyVisibleBlock() throws {
+        try loadShell()
+        let paragraphs = (1...80).map { "Paragraph number \($0) of the test." }
+        try render(paragraphs.joined(separator: "\n\n"))
+        XCTAssertEqual(try requestText(1, prefer: .selection).startOffset, 0)
+
+        // Scroll so that a paragraph is cut off at the top.
+        let expected = try XCTUnwrap(try evaluate("""
+            (function () {
+              var ps = document.querySelectorAll('#previewmd-root p');
+              var r = ps[30].getBoundingClientRect();
+              window.scrollTo(0, window.scrollY + r.top + r.height / 2);
+              for (var i = 0; i < ps.length; i++) {
+                if (ps[i].getBoundingClientRect().top >= 0) return ps[i].textContent;
+              }
+              return null;
+            })()
+            """) as? String)
+        XCTAssertEqual(expected, "Paragraph number 32 of the test.")
+        let reply = try requestText(2, prefer: .selection)
+        XCTAssertEqual(reply.startOffset, try range(of: expected, in: reply.text).lowerBound)
+
+        // A selection elsewhere wins for `selection`, not for `document`.
+        try select("number 40 ")
+        XCTAssertEqual(try requestText(3, prefer: .selection).startOffset,
+                       try range(of: "number 40 ", in: reply.text).lowerBound)
+        XCTAssertEqual(try requestText(4, prefer: .document).startOffset, reply.startOffset)
+    }
+
+    func testHotkeySelectionInsideFallbackMarks() throws {
+        try loadShell()
+        try render("Alpha beta gamma delta. Epsilon zeta.")
+        let (text, generation) = try requestText()
+        try evaluate("PreviewMDReadAloud.forceMarkMode(); 0")
+        try evaluate(ReadAloudBridge.activateJS(generation: generation))
+        let gamma = try range(of: "gamma", in: text)
+        try evaluate(ReadAloudBridge.applyJS(word: gamma, sentence: 0..<text.utf16.count))
+        // Select inside the <mark> piece: "mma".
+        try evaluate("""
+            (function () {
+              var t = document.querySelector('mark.univocal-word').firstChild;
+              window.getSelection().setBaseAndExtent(t, 2, t, 5);
+              return 0;
+            })()
+            """)
+        let reply = try requestText(2, prefer: .selection)
+        XCTAssertEqual(reply.text, text)
+        XCTAssertEqual(reply.startOffset, gamma.lowerBound + 2)
+        XCTAssertEqual(try painted("univocal-word"), ["gamma"], "the session keeps its highlight")
     }
 
     // MARK: Inert without the handler

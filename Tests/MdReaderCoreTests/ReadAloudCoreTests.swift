@@ -163,6 +163,37 @@ final class ReadAloudCoreTests: XCTestCase {
         XCTAssertEqual(try top(-100, 20, 0, 800), 0)
     }
 
+    // MARK: Hotkey start: firstVisibleIndex, lowerBound
+
+    func testFirstVisibleIndex() throws {
+        func first(_ tops: [Double], _ bottoms: [Double], _ height: Double = 600) throws -> Int {
+            Int(try call("firstVisibleIndex", tops, bottoms, height).toInt32())
+        }
+        // The first block whose top is on screen.
+        XCTAssertEqual(try first([0, 40, 80], [30, 70, 110]), 0)
+        // The top block is cut off: the next one.
+        XCTAssertEqual(try first([-20, 40, 80], [30, 70, 110]), 1)
+        // One block taller than the viewport, the next starts below it.
+        XCTAssertEqual(try first([-300, 700], [650, 720]), 0)
+        // Everything above the viewport, or nothing at all.
+        XCTAssertEqual(try first([-300, -100], [-200, -50]), -1)
+        XCTAssertEqual(try first([], []), -1)
+        // A block starting below the viewport is not visible.
+        XCTAssertEqual(try first([650], [700]), -1)
+    }
+
+    func testLowerBound() throws {
+        func lowerBound(_ values: [Int], atLeast: Int) -> Int {
+            let js = "PreviewMDReadAloudCore.lowerBound(\(values.count), function (i) { return \(values)[i] >= \(atLeast); })"
+            return Int(ctx.evaluateScript(js).toInt32())
+        }
+        XCTAssertEqual(lowerBound([1, 3, 5, 7], atLeast: 4), 2)
+        XCTAssertEqual(lowerBound([1, 3, 5, 7], atLeast: 0), 0)
+        XCTAssertEqual(lowerBound([1, 3, 5, 7], atLeast: 7), 3)
+        XCTAssertEqual(lowerBound([1, 3, 5, 7], atLeast: 8), 4)
+        XCTAssertEqual(lowerBound([], atLeast: 1), 0)
+    }
+
     // MARK: exceedsUTF8
 
     func testExceedsUTF8() throws {
