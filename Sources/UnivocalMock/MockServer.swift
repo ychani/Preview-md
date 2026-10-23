@@ -67,6 +67,10 @@ public struct MockBehaviour: Sendable {
     /// Opens the wake URL. `nil` → `NSWorkspace.open(_:configuration:)` with `activates = false`
     /// (CLI). Tests inject a recorder. Return `false` = "could not open" → `fellBack("wakeFailed")`.
     public var wakeOpener: (@Sendable (URL) -> Bool)?
+    /// Finds the app registered for the wake URL (§16.5 step 2). `nil` →
+    /// `NSWorkspace.urlForApplication(toOpen:)`, checked only when the URL
+    /// really opens (`wakeOpener == nil`); tests set it to exercise the check.
+    public var wakeHandlerLookup: (@Sendable (URL) -> URL?)?
     /// The frontmost app at start (change it with `MockServer.setFrontmost`). `nil` = none.
     public var frontmost: MockFrontmost?
 

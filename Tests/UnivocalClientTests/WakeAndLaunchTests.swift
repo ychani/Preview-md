@@ -3,6 +3,7 @@
 // Univocal Connect reference implementation — released under the MIT licence
 // (docs/univocal-protocol/LICENSE), independently of the host app's licence.
 
+import AppKit
 import XCTest
 @testable import UnivocalClient
 import UnivocalMock
@@ -52,6 +53,61 @@ final class WakeTests: UnivocalTestCase {
         XCTAssertEqual(again.grantIdentity, "unverified:com.example.tests")
         let count = await mock.connectionCount
         XCTAssertEqual(count, 1)
+    }
+
+    // §16.5 step 2 (S54): the handler is checked before anything opens.
+
+    func testNoRegisteredHandlerFallsBackWithoutOpening() async throws {
+        let app = try makeTestApp()
+        let wakes = WakeURLs()
+        let mock = try await startHotkeyServer {
+            $0.frontmost = MockFrontmost(pid: getpid(), bundleId: "com.example.fake", bundleURL: app)
+            $0.wakeOpener = wakes.opener
+            $0.wakeHandlerLookup = { _ in nil }
+        }
+        let outcome = await mock.simulateHotkey()
+        XCTAssertEqual(outcome, .fellBack(reason: "noHandler"))
+        let opened = await wakes.recorder.items
+        XCTAssertTrue(opened.isEmpty, "the URL must not be opened")
+        let pending = await mock.pendingHotkeyRequestId
+        XCTAssertNil(pending)
+    }
+
+    func testSchemeOwnedByAnotherAppFallsBackWithoutOpening() async throws {
+        let app = try makeTestApp()
+        let other = try makeTestApp(name: "Other", scheme: "fakeapp")
+        let wakes = WakeURLs()
+        let mock = try await startHotkeyServer {
+            $0.frontmost = MockFrontmost(pid: getpid(), bundleId: "com.example.fake", bundleURL: app)
+            $0.wakeOpener = wakes.opener
+            $0.wakeHandlerLookup = { _ in other }
+        }
+        let outcome = await mock.simulateHotkey()
+        XCTAssertEqual(outcome, .fellBack(reason: "handlerMismatch"))
+        let opened = await wakes.recorder.items
+        XCTAssertTrue(opened.isEmpty, "the URL must not be opened")
+    }
+
+    func testHandlerIsTheFrontmostAppSoItOpens() async throws {
+        let app = try makeTestApp()
+        let wakes = WakeURLs()
+        let mock = try await startHotkeyServer {
+            $0.frontmost = MockFrontmost(pid: getpid(), bundleId: "com.example.fake", bundleURL: app)
+            $0.wakeOpener = wakes.opener
+            $0.wakeHandlerLookup = { _ in app }
+            $0.wakeDeadline = .milliseconds(100)
+        }
+        let outcome = await mock.simulateHotkey()
+        XCTAssertEqual(outcome, .fellBack(reason: "wakeTimeout"))
+        _ = try await wakes.first()
+    }
+
+    func testLaunchServicesHasNoHandlerForAnUnknownScheme() throws {
+        let url = try XCTUnwrap(UnivocalWakeURL.make(scheme: "uc-unregistered-\(UUID().uuidString.prefix(8).lowercased())",
+                                                     requestId: "h1"))
+        XCTAssertEqual(MockServer.wakeHandlerProblem(for: url, frontmostBundleId: "com.example.fake") {
+            NSWorkspace.shared.urlForApplication(toOpen: $0)
+        }, "noHandler")
     }
 
     func testOpenerFailureIsWakeFailed() async throws {

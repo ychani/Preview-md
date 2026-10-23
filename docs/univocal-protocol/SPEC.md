@@ -882,28 +882,40 @@ major version with the server, `HotkeyTarget` is `true` and `WakeURLScheme` is
 set, the server:
 
 1. Creates the pending request (`requestId`) **before** waking.
-2. Opens the wake URL
+2. **Checks the handler before opening.** The server MUST call
+   `NSWorkspace.shared.urlForApplication(toOpen: url)` and MUST NOT open the
+   URL unless it returns an app whose bundle identifier equals `F`'s. If it
+   returns nothing — no app registered for the scheme, e.g. a build that
+   LaunchServices never registered, such as one run from `/tmp` — macOS
+   would show the user "There is no application set to open the URL…";
+   if it returns another app, that app would launch or activate. In both
+   cases the server drops the pending request and falls back **silently**
+   (§16.8), with no dialog of its own.
+3. Opens the wake URL
 
    ```
    <WakeURLScheme>://univocal-connect/read?requestId=<requestId>&v=1
    ```
 
-   with `NSWorkspace.shared.open(url, configuration:)` where
-   `configuration.activates = false` (the app is already frontmost; this
-   avoids focus churn and a Dock bounce). `v` is the protocol major version
+   with `F` itself — `NSWorkspace.shared.open([url], withApplicationAt:
+   F.bundleURL, configuration:)` — so that with two copies of one app (a
+   release and a dev build, same bundle id) the frontmost copy is the one
+   woken, where `configuration.activates = false` (the app is already
+   frontmost; this avoids focus churn and a Dock bounce) and
+   `addsToRecentItems = false`. `v` is the protocol major version
    the server will speak. Clients MUST ignore unknown query items. The URL
    path is fixed to `univocal-connect/read` so apps can route it without
    parsing anything else.
-3. Waits up to the **wake budget** (§16.6) for a connection whose `hello`
+4. Waits up to the **wake budget** (§16.6) for a connection whose `hello`
    carries `wakeRequestId == requestId` **and** resolves to `F` (§16.3). Both
    conditions are REQUIRED: the echo alone must not let a different process
    claim the request. A `hello` with a `wakeRequestId` that matches no
    pending request is treated as an ordinary `hello`.
-4. If that connection needs consent, the server prompts as usual and the
+5. If that connection needs consent, the server prompts as usual and the
    pending request **survives the prompt**: the wake budget is suspended
    while `consentPending` is outstanding and resumes on `consentGranted`.
    `consentDenied` ends the request → fallback.
-5. Right after `welcome` on that connection, the server sends the pending
+6. Right after `welcome` on that connection, the server sends the pending
    `readRequest` and continues at §16.4 step 5 with fresh `answerMs`/`acceptedMs`
    timers. The connection MUST have announced `hotkey-target`; if it did
    not, → fallback.
@@ -926,7 +938,7 @@ MAY be more generous and MUST advertise the values it uses in `readRequest`.
 |---|---|---|---|
 | Answer | `answerMs` ≥ 300 ms | `readRequest` sent | any of `read`, `readAccepted`, `readDecline` received |
 | Accepted | `acceptedMs` ≥ 1500 ms | `readRequest` sent | `read` received, after a `readAccepted` |
-| Wake | ≥ 1500 ms | wake URL opened | `hello{wakeRequestId}` received (consent time excluded, §16.5 step 4) |
+| Wake | ≥ 1500 ms | wake URL opened | `hello{wakeRequestId}` received (consent time excluded, §16.5 step 5) |
 | Cascade | `acceptedMs` total | hotkey | last `readRequest` sent to another connection after `notFocused` |
 
 Clients SHOULD aim far below these: a pre-extracted or cached text answers in
@@ -949,8 +961,8 @@ that session (`ended{preempted, by:"Univocal"}`) and proceeds for the new app.
 The fallback is the server's existing behaviour: capture the frontmost app's
 selection (or clipboard), read it in Univocal's panel, beep if empty. It runs
 whenever routing cannot complete: the app is not a target (no connection and
-no declaration, or connected without `hotkey-target`), wake or answer timed
-out, the client declined for any reason other than `notFocused` (or all
+no declaration, or connected without `hotkey-target`), the wake URL has no
+handler or another app's (§16.5 step 2), wake or answer timed out, the client declined for any reason other than `notFocused` (or all
 `notFocused` candidates are exhausted), the connection closed mid-request, or
 the request's `read` was rejected (`invalidArgument`, `limitExceeded`…). The
 server MUST NOT run the fallback after it accepted a client's `read` for the
@@ -1002,7 +1014,7 @@ server's: one host connection per browser profile answers for all of them.
 | Univocal's own panel or settings is frontmost | No routing; the server toggles its own reading as today. |
 | Several windows of the target app | The client answers for its key window (or main window if none is key). A connection that owns no key/main window (per-window connections) declines `notFocused` so the server can ask the next one. |
 | Target has a modal or sheet up | Client decides: read anyway, or `readDecline{busy}`. |
-| Consent not yet granted | Only reachable via the wake path (a connection without a grant is not `ready`). The pending request survives the prompt (§16.5 step 4); after Allow the request is delivered right after `welcome`. |
+| Consent not yet granted | Only reachable via the wake path (a connection without a grant is not `ready`). The pending request survives the prompt (§16.5 step 5); after Allow the request is delivered right after `welcome`. |
 | Univocal not running | The hotkey cannot fire. Clients never launch Univocal for hotkey purposes. |
 | Frontmost app is connected but did not announce `hotkey-target` | Not a candidate → declaration check (it may still declare and be woken; a second connection with the capability may then appear) → else fallback. |
 | Two hotkey presses in quick succession | Newest wins: the older request is dropped without fallback (§16.4). |

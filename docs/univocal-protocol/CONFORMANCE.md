@@ -78,6 +78,7 @@ Legend: ✓ covered · ◐ partial · — not covered · manual.
 | S51 | Frontmost == server itself → no routing, own toggle. | 16.11 | ✓ (frontmost bundle id == server bundle id; console `frontmost self`) | ✓ | manual |
 | S52 | Native-messaging host (if shipped) announces `hotkey-target` only when the extension asked; forwards `readRequest`, `readAccepted`, `readDecline`, `read{requestId}` unchanged. | 16.10 | — | — | manual |
 | S53 | Logs for hotkey routing contain pids, bundle ids, request ids, reasons and timings only — never selection or document text. | 13, 16 | ✓ (log scan in tests) | ✓ | manual (log review) |
+| S54 | Before opening the wake URL, checks `NSWorkspace.urlForApplication(toOpen:)` returns an app whose bundle id equals the frontmost app's; otherwise does not open it (no "There is no application set to open the URL…" dialog, no other app launched) and falls back silently. Opens it with the frontmost copy (`open(_:withApplicationAt: F.bundleURL…)`). | 16.5 | ✓ (default opener checks; `wakeHandlerLookup` in tests) | ✓ (`WakeTests` noHandler / handlerMismatch / LaunchServices) | manual |
 
 ## B. Client MUST items
 
@@ -131,7 +132,7 @@ UNIVOCAL_CONNECT_DIR=/tmp/uc-qa open -a PreviewMD                  # app against
 #   hotkey                                        # = hotkey selection
 #   hotkey document
 # prints the outcome: toggled paused|playing | routed <session> <client> | fell back <why>
-#   <why> ∈ noTarget | noDeclaration | wakeFailed | wakeTimeout | consentDenied | answerTimeout |
+#   <why> ∈ noTarget | noDeclaration | noHandler | handlerMismatch | wakeFailed | wakeTimeout | consentDenied | answerTimeout |
 #           acceptedTimeout | declined:<reason> | readRejected:<code> | superseded | disconnected
 #   a wake is logged separately as `hotkey #n woke <url>`
 

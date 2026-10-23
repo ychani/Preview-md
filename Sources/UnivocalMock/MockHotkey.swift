@@ -36,7 +36,7 @@ public enum MockHotkeyOutcome: Sendable, Equatable, CustomStringConvertible {
     case selfHandled
     case toggled(sessionId: String, paused: Bool)
     case routed(sessionId: String, clientId: String, requestId: String, accepted: Bool, viaWake: Bool)
-    /// `reason`: noTarget | noDeclaration | wakeFailed | wakeTimeout | consentDenied | answerTimeout |
+    /// `reason`: noTarget | noDeclaration | noHandler | handlerMismatch | wakeFailed | wakeTimeout | consentDenied | answerTimeout |
     /// acceptedTimeout | declined:<reason> | readRejected:<code> | superseded | disconnected.
     /// Every reason except `superseded` ran the server's own fallback (panel read).
     case fellBack(reason: String)
@@ -241,6 +241,17 @@ extension MockEngine {
         p.requestId = rid
         p.waking = true
         p.viaWake = true
+        // §16.5 step 2: never hand macOS a URL nobody (or another app)
+        // handles — it would show "There is no application set to open the
+        // URL…" to the user. Checked whenever the URL really opens, and in
+        // tests that inject a lookup.
+        if behaviour.wakeOpener == nil || behaviour.wakeHandlerLookup != nil {
+            let lookup = behaviour.wakeHandlerLookup ?? Self.workspaceHandler
+            if let problem = MockServer.wakeHandlerProblem(for: url, frontmostBundleId: p.frontmost.bundleId, lookup: lookup) {
+                log("hotkey #\(p.number) \(url.scheme ?? "?"):// is not handled by \(p.frontmost.bundleId) (\(problem)); not opened")
+                return conclude(p, .fellBack(reason: problem))
+            }
+        }
         log("hotkey #\(p.number) woke \(url.absoluteString)")
         let opened = behaviour.wakeOpener.map { $0(url) } ?? openWithWorkspace(url, press: p)
         guard opened else {
@@ -251,6 +262,14 @@ extension MockEngine {
         if p.wakeConnId == nil { arm(p, deadline: .now() + behaviour.wakeDeadline.timeInterval) }
     }
 
+    @Sendable private static func workspaceHandler(_ url: URL) -> URL? {
+        #if canImport(AppKit)
+        return NSWorkspace.shared.urlForApplication(toOpen: url)
+        #else
+        return nil
+        #endif
+    }
+
     private func openWithWorkspace(_ url: URL, press p: HotkeyPress) -> Bool {
         #if canImport(AppKit)
         let config = NSWorkspace.OpenConfiguration()
@@ -258,13 +277,20 @@ extension MockEngine {
         config.addsToRecentItems = false
         let rid = p.requestId
         let number = p.number
-        NSWorkspace.shared.open(url, configuration: config) { [weak self] _, error in
+        let done: @Sendable (NSRunningApplication?, Error?) -> Void = { [weak self] _, error in
             guard error != nil, let self else { return }
             self.queue.async {
                 guard let cur = self.press, cur.requestId == rid, cur.waking, !cur.done else { return }
                 self.log("hotkey #\(number) opening the wake URL failed")
                 self.conclude(cur, .fellBack(reason: "wakeFailed"))
             }
+        }
+        // Open with the frontmost copy itself: with two copies of one app
+        // (a release and a dev build), plain open(url) may wake the other.
+        if let app = p.frontmost.bundleURL {
+            NSWorkspace.shared.open([url], withApplicationAt: app, configuration: config, completionHandler: done)
+        } else {
+            NSWorkspace.shared.open(url, configuration: config, completionHandler: done)
         }
         return true
         #else
@@ -422,5 +448,18 @@ extension MockEngine {
             url.deleteLastPathComponent()
         }
         return nil
+    }
+}
+
+extension MockServer {
+    /// SPEC §16.5 step 2. `nil` when the URL's registered handler is the
+    /// frontmost app; else the fallback reason: `noHandler` (nothing
+    /// registered — e.g. a build LaunchServices never registered, such as
+    /// one in /tmp) or `handlerMismatch` (another app owns the scheme).
+    public static func wakeHandlerProblem(for url: URL, frontmostBundleId: String,
+                                          lookup: (URL) -> URL?) -> String? {
+        guard let handler = lookup(url) else { return "noHandler" }
+        let id = Bundle(url: handler)?.bundleIdentifier
+        return id == frontmostBundleId ? nil : "handlerMismatch"
     }
 }
