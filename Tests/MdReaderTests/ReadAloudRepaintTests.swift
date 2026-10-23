@@ -181,6 +181,84 @@ final class ReadAloudRepaintTests: XCTestCase {
         XCTAssertEqual(try painted("univocal-word"), [], "session 2 painted in the other window too")
     }
 
+    /// What the user sees, not what the registry holds: real word events,
+    /// then the composited window pixels (CGWindowListCreateImage) of the
+    /// sentences already read must carry no highlight tint. Replacing a
+    /// registered Highlight left its old ranges painted on screen even
+    /// though the registry was right (and `takeSnapshot` repaints fully, so
+    /// it hid that). Needs Screen Recording permission: env-gated.
+    func testFinishedSentencesLeaveNoPaintOnScreen() throws {
+        guard ProcessInfo.processInfo.environment["UNIVOCAL_QA_PIXELS"] == "1" else {
+            throw XCTSkip("set UNIVOCAL_QA_PIXELS=1 (needs Screen Recording permission)")
+        }
+        window.appearance = NSAppearance(named: .aqua)
+        window.setFrameOrigin(NSPoint(x: 0, y: 0))
+        window.orderFrontRegardless()
+        controller.toggle()
+        try spin("playing") { self.controller.status == .playing }
+        // Read through the heading, the paragraph and the table into the
+        // last sentence ("Final words close the note.").
+        let server = self.server!
+        var steps = 0
+        func inLastSentence() -> Bool {
+            guard let s = controller.currentSentence, let text = controller.sessionText else { return false }
+            return Self.slice(text, s).hasPrefix("Final")
+        }
+        while !inLastSentence() && steps < 80 {
+            try run { await server.advance(words: 1) }
+            try spinFor(0.12)       // let WebKit composite each step, like real speech
+            steps += 1
+        }
+        try spinFor(0.5)
+        XCTAssertTrue(inLastSentence(), "did not reach the last sentence")
+
+        let rects = try XCTUnwrap(try evaluate("""
+            JSON.stringify(['h1', 'p', 'table', 'p:last-of-type'].map(function (sel) {
+              var r = document.querySelector('#previewmd-root ' + sel).getBoundingClientRect();
+              return [r.left, r.top, r.width, r.height];
+            }))
+            """) as? String)
+        let boxes = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(rects.utf8)) as? [[Double]])
+        let image = try XCTUnwrap(CGWindowListCreateImage(.null, .optionIncludingWindow,
+                                                          CGWindowID(window.windowNumber),
+                                                          [.boundsIgnoreFraming, .bestResolution]),
+                                  "no window image (Screen Recording permission?)")
+        let scale = Double(image.width) / Double(window.frame.width)
+        XCTAssertGreaterThan(tintedPixels(image, box: boxes[3], scale: scale), 0,
+                             "the current sentence shows no highlight: capture not working?")
+        for (i, what) in ["the heading", "the paragraph", "the table"].enumerated() {
+            XCTAssertEqual(tintedPixels(image, box: boxes[i], scale: scale), 0,
+                           "\(what), read earlier, is still painted on screen")
+        }
+        if let out = ProcessInfo.processInfo.environment["UNIVOCAL_QA_OUT"] {
+            let rep = NSBitmapImageRep(cgImage: image)
+            try rep.representation(using: .png, properties: [:])?
+                .write(to: URL(fileURLWithPath: out).appendingPathComponent("pixels.png"))
+        }
+    }
+
+    /// Pixels inside `box` (CSS px from the page's top-left) tinted like the
+    /// read highlights: yellow/orange over the light page background.
+    private func tintedPixels(_ image: CGImage, box: [Double], scale: Double) -> Int {
+        let w = image.width, h = image.height
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return -1 }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let x0 = max(0, Int(box[0] * scale)), x1 = min(w, Int((box[0] + box[2]) * scale))
+        let y0 = max(0, Int(box[1] * scale)), y1 = min(h, Int((box[1] + box[3]) * scale))
+        var count = 0
+        for y in y0..<max(y0, y1) {
+            for x in x0..<max(x0, x1) {
+                let i = (y * w + x) * 4
+                let r = Int(data[i]), g = Int(data[i + 1]), b = Int(data[i + 2])
+                if r - b > 40 && g - b > 20 { count += 1 }
+            }
+        }
+        return count
+    }
+
     // MARK: - Steps
 
     /// Session 1 from the top, word by word through the heading and the
@@ -223,6 +301,16 @@ final class ReadAloudRepaintTests: XCTestCase {
                            "[\"univocal-sentence\",\"univocal-word\"]",
                            "[\"univocal-word\",\"univocal-sentence\"]"].contains(registered),
                           "unexpected highlight registrations: \(registered)")
+            // One Highlight per kind for the page's lifetime, changed in
+            // place (replacing it leaves stale paint on screen).
+            let same = try evaluate("""
+                (function () {
+                  var h = CSS.highlights.get('univocal-word');
+                  if (!window.__qaWord) window.__qaWord = h;
+                  return h === window.__qaWord;
+                })()
+                """, on: page) as? Bool
+            XCTAssertEqual(same, true, "the word Highlight was replaced instead of updated")
             let sentence = try painted("univocal-sentence", on: page).joined()
             if let s = controller.currentSentence {
                 XCTAssertTrue(Self.slice(text, s).contains(sentence.replacingOccurrences(of: "\n", with: "")) || sentence.isEmpty,

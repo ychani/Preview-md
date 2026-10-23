@@ -433,8 +433,8 @@
   function clearHighlights() {
     if (mode === 'css-highlight') {
       try {
-        highlightRegistry.delete(WORD);
-        highlightRegistry.delete(SENTENCE);
+        if (highlights[WORD]) highlights[WORD].clear();
+        if (highlights[SENTENCE]) highlights[SENTENCE].clear();
       } catch (e) {}
     } else {
       clearMarks();
@@ -450,24 +450,36 @@
     return r;
   }
 
+  // One registered Highlight per kind, for the page's lifetime, changed in
+  // place with clear()/add(). Replacing it in the registry instead
+  // (registry.set with a new Highlight) leaves WebKit's old paint on screen
+  // where nothing else repaints it — a finished heading keeps its tint and
+  // last word — even though the registry itself is right.
+  var highlights = Object.create(null);
+  function highlightFor(name, priority) {
+    var h = highlights[name];
+    if (!h) {
+      h = new HighlightAPI();
+      h.priority = priority;
+      highlightRegistry.set(name, h);
+      highlights[name] = h;
+    }
+    return h;
+  }
+
   // One Range per text-node slice, so a sentence that crosses inline
   // elements paints only its text. Returns the first range (scroll target).
   function paintHighlight(name, slices, priority) {
-    if (!slices.length) {
-      try { highlightRegistry.delete(name); } catch (e) {}
-      return null;
-    }
+    var h;
+    try { h = highlightFor(name, priority); h.clear(); } catch (e) { return null; }
     var first = null;
-    try {
-      var h = new HighlightAPI();
-      h.priority = priority;
-      for (var i = 0; i < slices.length; i++) {
+    for (var i = 0; i < slices.length; i++) {
+      try {
         var r = rangeOf(slices[i]);
         if (!first) first = r;
         h.add(r);
-      }
-      highlightRegistry.set(name, h);
-    } catch (e) { return null; }
+      } catch (e) {}
+    }
     return first;
   }
 
