@@ -66,7 +66,7 @@ let package = Package(
         // Read Aloud controller tests (app target, fake backend).
         .testTarget(
             name: "MdReaderTests",
-            dependencies: ["MdReader", "UnivocalClient"],
+            dependencies: ["MdReader", "UnivocalClient", "UnivocalMock"],
             path: "Tests/MdReaderTests"
         ),
     ]

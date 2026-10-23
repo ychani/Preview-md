@@ -100,7 +100,7 @@ final class ReadAloudController: ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var connectionTask: Task<Void, Never>?
     private var session: (any ReadAloudSession)?
-    private var sessionText: String?
+    private(set) var sessionText: String?
     private var sessionGeneration: Int?
     /// An edit arrived while paused: restart there on resume instead.
     private var pendingRestart: (text: String, startOffset: Int, generation: Int)?

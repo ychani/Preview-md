@@ -306,6 +306,8 @@
   function activate(opts) {
     opts = opts || {};
     cancelChange();
+    // A new session (or a re-attach) never inherits the last one's paint.
+    clearHighlights();
     active = true;
     stale = false;
     awaitingRestart = false;
