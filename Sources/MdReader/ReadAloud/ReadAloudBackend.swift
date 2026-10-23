@@ -38,12 +38,11 @@ protocol ReadAloudBackend: AnyObject, Sendable {
     func serverAppearances() -> AsyncStream<UnivocalDiscovery>
 }
 
-/// One reading session (the SDK's `ReadingSession`).
+/// One reading session (the SDK's `ReadingSession`). PreviewMD never pauses
+/// or resumes one itself: Univocal's pill does, server-side.
 protocol ReadAloudSession: AnyObject, Sendable {
     var id: String { get }
     var events: AsyncStream<ReadingEvent> { get }
-    func pause() async throws
-    func resume() async throws
     func stop() async throws
     func seek(toUTF16Offset offset: Int) async throws
 }

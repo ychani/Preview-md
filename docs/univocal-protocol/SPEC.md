@@ -701,6 +701,10 @@ A client that implements (1) SHOULD fall back to (2) when Univocal is installed
 but the user has denied consent, and to a "Get Univocal" link when it is not
 installed.
 
+A server MAY show its own transport controls for a Connect session (pause,
+previous/next sentence, speed, voice, stop); they are reported as in §6, so a
+client MAY rely on them instead of drawing its own (informative).
+
 ## 15. End-to-end transcript (Unix socket, NDJSON)
 
 PreviewMD reads a two-paragraph document; the user pauses, resumes, and

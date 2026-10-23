@@ -132,7 +132,7 @@ final class ReadAloudRepaintTests: XCTestCase {
 
     func testSecondInAppSessionShowsOnlyItsOwnWord() throws {
         try readFirstSessionToTheEnd()
-        controller.toggle()
+        controller.readAloud()
         try checkSecondSession()
     }
 
@@ -148,7 +148,7 @@ final class ReadAloudRepaintTests: XCTestCase {
     /// loads mid-read); A must be cleared then, both when it ends, and the
     /// next session paints only B's current word.
     func testHighlightsLiveOnOnePageAcrossWindows() throws {
-        controller.toggle()
+        controller.readAloud()
         try spin("session 1 playing") { self.controller.status == .playing }
         for _ in 0..<3 {
             let server = self.server!
@@ -194,7 +194,7 @@ final class ReadAloudRepaintTests: XCTestCase {
         window.appearance = NSAppearance(named: .aqua)
         window.setFrameOrigin(NSPoint(x: 0, y: 0))
         window.orderFrontRegardless()
-        controller.toggle()
+        controller.readAloud()
         try spin("playing") { self.controller.status == .playing }
         // Read through the heading, the paragraph and the table into the
         // last sentence ("Final words close the note.").
@@ -284,7 +284,7 @@ final class ReadAloudRepaintTests: XCTestCase {
     /// Session 1 from the top, word by word through the heading and the
     /// table, until Univocal reports `finished`.
     private func readFirstSessionToTheEnd() throws {
-        controller.toggle()
+        controller.readAloud()
         try spin("session 1 playing") { self.controller.status == .playing }
         var steps = 0
         while controller.status != .idle {

@@ -1,25 +1,27 @@
 import SwiftUI
 
-/// Toolbar play/pause button (plus Stop while reading). Observes the
-/// controller itself so word-by-word progress never re-renders the window.
+/// Toolbar Read Aloud button. It only starts a reading: while one runs it
+/// shows a non-interactive "reading" speaker — Univocal's floating pill is
+/// the control (pause, previous/next sentence, speed, voice, stop). Observes
+/// the controller itself so word-by-word progress never re-renders the
+/// window.
 struct ReadAloudToolbarControls: View {
     @ObservedObject var readAloud: ReadAloudController
     /// A document is shown in Preview or Split view.
     let isDocumentReady: Bool
 
     var body: some View {
-        HStack(spacing: 0) {
-            if readAloud.status.isActive {
-                Button {
-                    readAloud.stop()
-                } label: {
-                    Label("Stop Reading", systemImage: "stop.fill")
-                        .labelStyle(.iconOnly)
-                }
-                .help("Stop Reading")
-            }
+        if readAloud.status.isReading {
+            Image(systemName: readAloud.status == .paused ? "speaker.fill" : "speaker.wave.2.fill")
+                .foregroundStyle(Color.accentColor)
+                .frame(minWidth: 28, minHeight: 22)
+                .contentShape(Rectangle())
+                .help(readAloud.helpText)
+                .accessibilityLabel(readAloud.status == .paused ? "Reading Aloud, Paused" : "Reading Aloud")
+                .accessibilityHint("Use Univocal's controls to pause or stop")
+        } else {
             Button {
-                readAloud.toggle()
+                readAloud.readAloud()
             } label: {
                 Label {
                     Text(title)
@@ -35,15 +37,11 @@ struct ReadAloudToolbarControls: View {
     }
 
     private var title: String {
-        readAloud.status == .unavailable ? "Get Univocal" : readAloud.toggleTitle
+        readAloud.status == .unavailable ? "Get Univocal" : "Read Aloud"
     }
 
     private var isEnabled: Bool {
-        switch readAloud.status {
-        case .unavailable: return true
-        case .starting, .awaitingConsent: return false
-        default: return readAloud.canToggle(documentReady: isDocumentReady)
-        }
+        readAloud.status == .unavailable || readAloud.canStart(documentReady: isDocumentReady)
     }
 
     @ViewBuilder
@@ -51,7 +49,7 @@ struct ReadAloudToolbarControls: View {
         switch readAloud.status {
         case .unavailable:
             Image(systemName: "arrow.down.circle")
-        case .idle, .failed:
+        case .idle, .failed, .playing, .paused:
             Image(systemName: "speaker.wave.2")
         case .starting:
             ProgressView().controlSize(.small)
@@ -59,33 +57,26 @@ struct ReadAloudToolbarControls: View {
             Image(systemName: "person.badge.clock")
         case .unauthorized:
             Image(systemName: "speaker.slash")
-        case .playing:
-            Image(systemName: "pause.fill")
-        case .paused:
-            Image(systemName: "play.fill")
         }
     }
 }
 
-/// Edit ▸ Read Aloud submenu. ⇧⌘R plays/pauses, ⇧⌘. stops (⌥⌘R is Reveal
-/// in Finder). Not called "Speech": the standard Edit menu may already carry
-/// AppKit's Speech submenu (Start/Stop Speaking).
+/// Edit ▸ Read Aloud submenu. ⇧⌘R starts reading (⌥⌘R is Reveal in
+/// Finder); while a reading runs the item is disabled and says the controls
+/// are in Univocal — ⇧⌘R does nothing then, and there is no Stop item.
+/// Univocal's ⌥⇧R pauses/resumes from anywhere. Not called "Speech": the
+/// standard Edit menu may already carry AppKit's Speech submenu
+/// (Start/Stop Speaking).
 struct ReadAloudCommands: View {
     @ObservedObject var readAloud: ReadAloudController
     let isDocumentReady: Bool
 
     var body: some View {
         Button(readAloud.menuTitle) {
-            readAloud.toggle()
+            readAloud.readAloud()
         }
         .keyboardShortcut("r", modifiers: [.command, .shift])
-        .disabled(!readAloud.canToggle(documentReady: isDocumentReady))
-
-        Button("Stop Reading") {
-            readAloud.stop()
-        }
-        .keyboardShortcut(".", modifiers: [.command, .shift])
-        .disabled(!readAloud.status.isActive)
+        .disabled(!readAloud.canStart(documentReady: isDocumentReady))
 
         if readAloud.status == .unavailable {
             Divider()

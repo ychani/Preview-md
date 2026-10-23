@@ -136,7 +136,7 @@ struct MdReaderApp: App {
                 .keyboardShortcut("f", modifiers: .command)
                 .disabled(appState.selectedFile == nil)
 
-                // ⇧⌘R / ⇧⌘. (⌥⌘R is Reveal in Finder).
+                // ⇧⌘R starts reading (⌥⌘R is Reveal in Finder).
                 Menu("Read Aloud") {
                     ReadAloudCommands(readAloud: appState.readAloud,
                                       isDocumentReady: appState.canReadAloud)

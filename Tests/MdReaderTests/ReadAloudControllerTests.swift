@@ -6,7 +6,8 @@ import XCTest
 
 // MARK: - Fakes
 
-/// A session whose events the test feeds, recording the controls it gets.
+/// A session whose events the test feeds, recording the calls it gets
+/// (stop and seek only: Univocal's pill pauses and resumes).
 private final class FakeSession: ReadAloudSession, @unchecked Sendable {
     let id = UUID().uuidString
     let events: AsyncStream<ReadingEvent>
@@ -27,8 +28,6 @@ private final class FakeSession: ReadAloudSession, @unchecked Sendable {
         for event in events { continuation.yield(event) }
     }
 
-    func pause() async throws { record("pause") }
-    func resume() async throws { record("resume") }
     func stop() async throws { record("stop") }
     func seek(toUTF16Offset offset: Int) async throws { record("seek:\(offset)") }
 }
@@ -277,7 +276,7 @@ final class ReadAloudControllerTests: XCTestCase {
     /// Play → page text → a playing session.
     @discardableResult
     private func startPlaying(text: String = text, generation: Int = 1) async -> FakeSession {
-        controller.toggle()
+        controller.readAloud()
         XCTAssertEqual(controller.status, .starting(nil))
         guard case .requestText(let request)? = bridge.calls.last else {
             XCTFail("no requestText")
@@ -320,16 +319,8 @@ final class ReadAloudControllerTests: XCTestCase {
         await eventually { controller.status == .starting("Waiting for text…") }
     }
 
-    func testPauseResumeStop() async {
+    func testStopEndsTheSessionAndIgnoresLateEvents() async {
         let session = await startPlaying()
-        controller.toggle()
-        await eventually { session.calls == ["pause"] }
-        session.send(.state(.paused, detail: nil))
-        await eventually { controller.status == .paused }
-        XCTAssertEqual(controller.toggleTitle, "Resume Reading")
-        controller.toggle()
-        await eventually { session.calls == ["pause", "resume"] }
-
         controller.stop()
         XCTAssertEqual(controller.status, .idle)
         XCTAssertEqual(bridge.calls.last, .deactivate)
@@ -338,6 +329,58 @@ final class ReadAloudControllerTests: XCTestCase {
         session.send(.word(0..<5))
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(bridge.calls.last, .deactivate)
+    }
+
+    /// Univocal's pill is the only transport control: PreviewMD's Read
+    /// Aloud command never pauses, resumes or stops a running session.
+    func testReadAloudCommandDoesNothingWhileReading() async {
+        let session = await startPlaying()
+        controller.readAloud()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(controller.status, .playing)
+        session.send(.state(.paused, detail: nil))
+        await eventually { controller.status == .paused }
+        controller.readAloud()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(controller.status, .paused)
+        XCTAssertTrue(session.calls.isEmpty, "no stop or seek from PreviewMD: \(session.calls)")
+        XCTAssertEqual(backend.requests.count, 1, "no new read either")
+    }
+
+    /// While reading, the toolbar and menu only say where the controls are.
+    func testWhileReadingTheCommandIsDisabledAndPointsToUnivocal() async {
+        XCTAssertEqual(controller.menuTitle, "Read Aloud")
+        XCTAssertTrue(controller.canStart(documentReady: true))
+        XCTAssertFalse(controller.canStart(documentReady: false))
+        let session = await startPlaying()
+        XCTAssertTrue(controller.status.isReading)
+        XCTAssertFalse(controller.canStart(documentReady: true))
+        XCTAssertEqual(controller.menuTitle, "Reading Aloud — Controls in Univocal")
+        XCTAssertEqual(controller.helpText, "Reading aloud — pause, skip or stop in Univocal's controls")
+        session.send(.state(.paused, detail: nil))
+        await eventually { controller.status == .paused }
+        XCTAssertTrue(controller.status.isReading)
+        XCTAssertFalse(controller.canStart(documentReady: true))
+        XCTAssertEqual(controller.menuTitle, "Reading Aloud — Controls in Univocal")
+        XCTAssertEqual(controller.helpText, "Reading paused — resume or stop in Univocal's controls")
+        session.send(.ended(.stopped, by: nil))
+        await eventually { controller.status == .idle }
+        XCTAssertFalse(controller.status.isReading)
+        XCTAssertTrue(controller.canStart(documentReady: true))
+        XCTAssertEqual(controller.helpText, "Read Aloud")
+    }
+
+    /// The pill's pause/resume/stop arrive as ordinary session events.
+    func testUnivocalsControlsDriveTheStatus() async {
+        let session = await startPlaying()
+        session.send(.state(.paused, detail: nil))
+        await eventually { controller.status == .paused }
+        session.send(.state(.playing, detail: nil), .sentence(13..<24), .word(13..<19))
+        await eventually { controller.status == .playing && controller.currentWord == 13..<19 }
+        session.send(.ended(.stopped, by: nil))
+        await eventually { controller.status == .idle }
+        XCTAssertEqual(bridge.calls.last, .deactivate)
+        XCTAssertTrue(session.calls.isEmpty)
     }
 
     func testPreemptionEndsSilently() async {
@@ -387,18 +430,21 @@ final class ReadAloudControllerTests: XCTestCase {
         await eventually { bridge.calls.last == .activate(2) }
     }
 
-    func testTextChangeWhilePausedRestartsOnResume() async {
+    /// An edit while Univocal has the reading paused: when its pill resumes
+    /// (`state: playing`), the reading restarts on the edited text.
+    func testTextChangeWhilePausedRestartsWhenUnivocalResumes() async {
         let session = await startPlaying()
-        controller.toggle()
         session.send(.state(.paused, detail: nil))
         await eventually { controller.status == .paused }
-        controller.handle(.textChanged("Changed.", startOffset: 0, generation: 2), from: page)
+        controller.handle(.textChanged("Changed. Again.", startOffset: 9, generation: 2), from: page)
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(backend.requests.count, 1, "no restart while paused")
-        controller.toggle()
+        session.send(.state(.playing, detail: nil))
         await eventually { backend.requests.count == 2 }
-        XCTAssertEqual(backend.requests[1].text, "Changed.")
-        XCTAssertFalse(session.calls.contains("resume"))
+        XCTAssertEqual(backend.requests[1].text, "Changed. Again.")
+        XCTAssertEqual(backend.requests[1].startOffset, 9)
+        await eventually { session.calls == ["stop"] }
+        await eventually { bridge.calls.last == .activate(2) }
     }
 
     func testNewPageReattachesTheRunningSession() async {
@@ -418,21 +464,21 @@ final class ReadAloudControllerTests: XCTestCase {
         backend.installed = false
         controller.refreshAvailability()
         XCTAssertEqual(controller.status, .unavailable)
-        XCTAssertFalse(controller.canToggle(documentReady: true))
-        controller.toggle()
+        XCTAssertFalse(controller.canStart(documentReady: true))
+        controller.readAloud()
         XCTAssertEqual(opened, [UnivocalLocator.downloadURL])
         XCTAssertFalse(bridge.calls.contains { if case .requestText = $0 { return true } else { return false } })
 
         // Installed meanwhile: the next click reads.
         backend.installed = true
-        controller.toggle()
+        controller.readAloud()
         XCTAssertEqual(controller.status, .starting(nil))
     }
 
     func testAwaitingConsentThenDenied() async {
         backend.hold = true
         backend.error = UnivocalError(code: .consentDenied, reason: "user")
-        controller.toggle()
+        controller.readAloud()
         guard case .requestText(let request)? = bridge.calls.last else { return XCTFail("no requestText") }
         controller.handle(.text(Self.text, generation: 1, request: request), from: page)
         await eventually { backend.isHolding }
@@ -441,19 +487,19 @@ final class ReadAloudControllerTests: XCTestCase {
         backend.sendState(.awaitingConsent)
         await eventually { controller.status == .awaitingConsent }
         XCTAssertEqual(controller.helpText, "Waiting for approval in Univocal…")
-        XCTAssertFalse(controller.canToggle(documentReady: true))
+        XCTAssertFalse(controller.canStart(documentReady: true))
         backend.release()
         await eventually { controller.status == .unauthorized(ReadAloudController.consentMessage(reason: "user")) }
 
         // Retry asks again.
-        controller.toggle()
+        controller.readAloud()
         XCTAssertEqual(controller.status, .starting(nil))
         XCTAssertEqual(bridge.calls.filter { if case .requestText = $0 { return true } else { return false } }.count, 2)
     }
 
     func testLaunchFailureShowsMessage() async {
         backend.error = UnivocalError(code: .launchTimedOut)
-        controller.toggle()
+        controller.readAloud()
         guard case .requestText(let request)? = bridge.calls.last else { return XCTFail("no requestText") }
         controller.handle(.text(Self.text, generation: 1, request: request), from: page)
         await eventually { controller.status == .failed("Univocal didn't start") }
@@ -461,7 +507,7 @@ final class ReadAloudControllerTests: XCTestCase {
 
     func testStopWhileStartingStopsTheLateSession() async {
         backend.hold = true
-        controller.toggle()
+        controller.readAloud()
         guard case .requestText(let request)? = bridge.calls.last else { return XCTFail("no requestText") }
         controller.handle(.text(Self.text, generation: 1, request: request), from: page)
         await eventually { backend.isHolding }
@@ -473,7 +519,7 @@ final class ReadAloudControllerTests: XCTestCase {
     }
 
     func testPageWithoutTextFails() {
-        controller.toggle()
+        controller.readAloud()
         guard case .requestText(let request)? = bridge.calls.last else { return XCTFail("no requestText") }
         controller.handle(.error(code: "noContent", request: request), from: page)
         XCTAssertEqual(controller.status, .failed("There is no text to read in this document"))
@@ -485,7 +531,7 @@ final class ReadAloudControllerTests: XCTestCase {
 
     func testNeedsAPreview() {
         let lonely = ReadAloudController(backend: backend, bridge: FakeBridge(), openURL: { _ in })
-        lonely.toggle()
+        lonely.readAloud()
         XCTAssertEqual(lonely.status, .failed("Show the preview to read aloud"))
     }
 
@@ -547,7 +593,7 @@ final class ReadAloudControllerTests: XCTestCase {
 
     func testHotkeyDeclinesWhileAnInAppStartIsPending() async {
         controller.hotkeySource = { .preview }
-        controller.toggle()
+        controller.readAloud()
         XCTAssertEqual(controller.status, .starting(nil))
         controller.handleReadRequest(hotkey())
         await expectDecline(.busy, "starting")

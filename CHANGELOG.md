@@ -8,10 +8,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ### Added
 - **Read Aloud** with word-by-word highlighting through
   [Univocal](https://univocalapp.com) (Univocal Connect protocol): the toolbar
-  button or Edit ▸ Read Aloud (⇧⌘R play/pause, ⇧⌘. stop) reads the preview,
-  highlights the current word and sentence, and follows them as they scroll
-  out of view (a manual scroll pauses following for a few seconds). Click a
-  word while reading to jump there. Code blocks, diagrams, images and front
+  button or Edit ▸ Read Aloud (⇧⌘R) reads the preview, highlights the current
+  word and sentence, and follows them as they scroll out of view (a manual
+  scroll pauses following for a few seconds). Click a word while reading to
+  jump there. Univocal's floating controls pause, skip sentences, change
+  speed or voice, and stop; PreviewMD has no pause or stop of its own — while
+  it reads, the toolbar button shows a reading state and ⇧⌘R does nothing. Code blocks, diagrams, images and front
   matter are skipped. Edits in Split view (or a reload from disk) restart
   reading at the current sentence; switching documents or to Edit view
   stops it. Univocal asks once for permission; without Univocal installed

@@ -9,8 +9,14 @@ import WebKit
 /// Flow on play: ask the page for its text → `backend.startReading` (which
 /// connects, launching Univocal and waiting for the user's approval in
 /// Univocal if needed) → forward the session's word/sentence events to the
-/// page. Reading stops on a document switch, on Edit view, and on ⇧⌘.; a
-/// document edit mid-session restarts at the re-mapped current sentence.
+/// page. Reading stops on a document switch and on Edit view; a document
+/// edit mid-session restarts at the re-mapped current sentence.
+///
+/// PreviewMD only starts a reading. Univocal's floating pill is the one
+/// transport control (play/pause, previous/next sentence, speed, voice,
+/// stop); its actions arrive as ordinary session events (`state`,
+/// `sentence`/`word`, `rate`, `ended{stopped}`), which this controller
+/// follows. Univocal's ⌥⇧R also pauses/resumes a reading server-side.
 ///
 /// Nothing launches Univocal before a click, and without Univocal installed
 /// the only affordance is "Get Univocal".
@@ -42,7 +48,10 @@ final class ReadAloudController: ObservableObject {
         /// The last attempt failed; cleared by the next action.
         case failed(String)
 
-        /// A session is starting or running (Stop applies).
+        /// A session is reading (or paused in Univocal's pill).
+        var isReading: Bool { self == .playing || self == .paused }
+
+        /// A session is starting or running.
         var isActive: Bool {
             switch self {
             case .starting, .awaitingConsent, .playing, .paused: return true
@@ -102,7 +111,7 @@ final class ReadAloudController: ObservableObject {
     private var session: (any ReadAloudSession)?
     private(set) var sessionText: String?
     private var sessionGeneration: Int?
-    /// An edit arrived while paused: restart there on resume instead.
+    /// An edit arrived while paused: restart there when Univocal resumes.
     private var pendingRestart: (text: String, startOffset: Int, generation: Int)?
     /// A non-fatal session error, reported if the session then ends.
     private var lastSessionError: UnivocalError?
@@ -152,9 +161,11 @@ final class ReadAloudController: ObservableObject {
 
     // MARK: - Actions
 
-    /// Play from idle, pause while playing, resume while paused. Without
-    /// Univocal installed, opens its download page.
-    func toggle() {
+    /// The Read Aloud command (toolbar, ⇧⌘R): starts reading the preview
+    /// from the top; without Univocal installed, opens its download page.
+    /// Does nothing while a reading is starting or running — Univocal's pill
+    /// (or its ⌥⇧R) pauses, skips and stops it.
+    func readAloud() {
         switch status {
         case .unavailable, .idle, .failed, .unauthorized:
             refreshAvailability(force: true)
@@ -163,21 +174,14 @@ final class ReadAloudController: ObservableObject {
             } else {
                 start()
             }
-        case .playing:
-            control { try await $0.pause() }
-        case .paused:
-            if let restart = pendingRestart {
-                restartSession(text: restart.text, startOffset: restart.startOffset,
-                               generation: restart.generation)
-            } else {
-                control { try await $0.resume() }
-            }
-        case .starting, .awaitingConsent:
+        case .starting, .awaitingConsent, .playing, .paused:
             break
         }
     }
 
     /// Stops reading (or the attempt to start) and clears the highlights.
+    /// Not a user control: a document switch, Edit view or an editor edit
+    /// ends the reading this way.
     func stop() {
         guard status.isActive || session != nil || pendingRequest != nil else { return }
         let old = session
@@ -535,6 +539,12 @@ final class ReadAloudController: ObservableObject {
         case .state(.loading, let detail):
             status = .starting(detail)
         case .state(.playing, _):
+            if let restart = pendingRestart {
+                // Univocal resumed after an edit: read the edited text.
+                restartSession(text: restart.text, startOffset: restart.startOffset,
+                               generation: restart.generation)
+                return
+            }
             status = .playing
         case .state(.paused, _):
             status = .paused
@@ -632,12 +642,6 @@ final class ReadAloudController: ObservableObject {
         bridge.deactivate()
     }
 
-    private func control(_ action: @escaping @Sendable (any ReadAloudSession) async throws -> Void) {
-        guard let session else { return }
-        // Failures (e.g. the session just ended) surface as events.
-        Task { try? await action(session) }
-    }
-
     /// Follows the SDK's connection state while starting: launching,
     /// connecting, waiting for the user's approval in Univocal.
     private func observeConnection() {
@@ -700,21 +704,13 @@ final class ReadAloudController: ObservableObject {
 
     // MARK: - Presentation
 
-    /// Title of the play/pause command.
-    var toggleTitle: String {
-        switch status {
-        case .playing: return "Pause Reading"
-        case .paused: return "Resume Reading"
-        default: return "Read Aloud"
-        }
-    }
-
-    /// Menu title: the toggle, or what is going on instead.
+    /// Menu title: "Read Aloud", or what is going on instead.
     var menuTitle: String {
         switch status {
         case .awaitingConsent: return "Waiting for Approval in Univocal…"
+        case .playing, .paused: return "Reading Aloud — Controls in Univocal"
         case .failed(let message): return "Read Aloud — \(message)"
-        default: return toggleTitle
+        default: return "Read Aloud"
         }
     }
 
@@ -726,17 +722,17 @@ final class ReadAloudController: ObservableObject {
         case .starting(let detail): return detail ?? "Starting…"
         case .awaitingConsent: return "Waiting for approval in Univocal…"
         case .unauthorized(let message): return message
-        case .playing: return "Pause Reading"
-        case .paused: return "Resume Reading"
+        case .playing: return "Reading aloud — pause, skip or stop in Univocal's controls"
+        case .paused: return "Reading paused — resume or stop in Univocal's controls"
         case .failed(let message): return "Read Aloud — \(message)"
         }
     }
 
-    /// Whether play/pause applies now (the menu item's enabled state).
-    func canToggle(documentReady: Bool) -> Bool {
+    /// Whether Read Aloud can start now (the menu item's enabled state).
+    /// Never while a reading is starting or running.
+    func canStart(documentReady: Bool) -> Bool {
         switch status {
-        case .unavailable, .starting, .awaitingConsent: return false
-        case .playing, .paused: return true
+        case .unavailable, .starting, .awaitingConsent, .playing, .paused: return false
         case .idle, .failed, .unauthorized: return documentReady
         }
     }

@@ -23,7 +23,8 @@ import XCTest
 /// paragraph, then drives the mock console through the ctl file —
 /// `frontmost <bundle-id> <this pid>` and `hotkey` — and checks that the
 /// reading starts at the selection, that a second `hotkey` pauses (Univocal
-/// toggles) and a third resumes.
+/// toggles; the highlight stays put) and a third resumes. PreviewMD has no
+/// pause control of its own: Univocal's pill and hotkey are the controls.
 @MainActor
 final class ReadAloudLiveQATests: XCTestCase {
     private final class Backend: ReadAloudBackend, @unchecked Sendable {
@@ -109,7 +110,7 @@ final class ReadAloudLiveQATests: XCTestCase {
         try evaluate(try XCTUnwrap(MarkdownRenderBridge.renderJS(for: markdown)) + "; 0")
         note("highlight mode: \(controller.highlightMode ?? "?")")
 
-        controller.toggle()
+        controller.readAloud()
         try spin(until: "consent or playing", 30) {
             controller.status == .awaitingConsent || controller.status == .playing
         }
@@ -135,16 +136,6 @@ final class ReadAloudLiveQATests: XCTestCase {
             words.append(word); scrolls.append(y)
             note("t\(i) status=\(controller.status) word=\(word.debugDescription) scrollY=\(y) sentence=\(sentence.prefix(60).debugDescription)")
             try snapshot(outURL, "read-\(i)")
-            if i == 3 {
-                controller.toggle()  // pause
-                try spin(until: "paused", 10) { controller.status == .paused }
-                let frozen = try painted("univocal-word").joined()
-                spinFor(1.0)
-                XCTAssertEqual(try painted("univocal-word").joined(), frozen, "highlight moved while paused")
-                note("paused on \(frozen.debugDescription); resuming")
-                controller.toggle()
-                try spin(until: "resumed", 10) { controller.status == .playing }
-            }
             if i == 6 {
                 // An edit mid-read: the page re-renders and reading resumes
                 // at the current sentence of the new text.
@@ -258,6 +249,9 @@ final class ReadAloudLiveQATests: XCTestCase {
 
         try console("hotkey")
         try spin(until: "toggled paused", 10) { controller.status == .paused }
+        let frozen = try painted("univocal-word").joined()
+        spinFor(1.0)
+        XCTAssertEqual(try painted("univocal-word").joined(), frozen, "highlight moved while paused")
         try console("hotkey")
         try spin(until: "toggled playing", 10) { controller.status == .playing }
         controller.stop()

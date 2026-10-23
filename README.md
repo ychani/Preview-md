@@ -97,7 +97,7 @@ defaults delete com.preview-md.app 2>/dev/null || true
 
 - **Preview, Split, and Edit views** (⌘1 / ⌘2 / ⌘3) with GitHub-style rendering that follows light and dark mode.
 - **Auto-reload** follows changes made in another app and asks first if you have unsaved edits.
-- **Read Aloud** (⇧⌘R) highlights each word and sentence as [Univocal](https://univocalapp.com) reads the preview to you, and scrolls along. Click a word to jump there; ⇧⌘. stops. Univocal's own ⌥⇧R works here too: it reads from your selection (in the preview or the editor) and highlights in place. Needs a Univocal release with Connect support (coming soon).
+- **Read Aloud** (⇧⌘R) highlights each word and sentence as [Univocal](https://univocalapp.com) reads the preview to you, and scrolls along. Click a word to jump there. While it reads, Univocal's floating controls pause, skip, change speed or voice, and stop. Univocal's own ⌥⇧R works here too: it reads from your selection (in the preview or the editor) and highlights in place. Needs a Univocal release with Connect support (coming soon).
 - **Encoding-aware saving** keeps a file's original encoding (UTF-8, UTF-16, Latin-1/CP-1252, or Shift-JIS), byte-order mark, and line endings.
 
 ### Explorer & workspace
@@ -170,8 +170,7 @@ All of these are good apps. Use PreviewMD when you want to read Markdown, includ
 | ⌥⌘R | Reveal in Finder |
 | ⌥⌘C | Copy Path |
 | ⇧⌥⌘C | Copy Relative Path (file inside the workspace) |
-| ⇧⌘R | Read Aloud / pause / resume |
-| ⇧⌘. | Stop reading |
+| ⇧⌘R | Read Aloud (pause and stop are in Univocal's controls) |
 
 ## FAQ
 
