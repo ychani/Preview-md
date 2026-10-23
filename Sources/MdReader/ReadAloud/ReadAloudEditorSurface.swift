@@ -14,6 +14,10 @@ protocol ReadAloudEditorSurface: AnyObject {
     var text: String { get }
     /// The editor's selection (a caret has length 0).
     var selectedRange: NSRange { get }
+    /// The editor is its window's first responder: its caret is where the
+    /// user is. An unfocused editor's caret means nothing (SwiftUI leaves it
+    /// at the end of the text).
+    var isFocused: Bool { get }
     /// Start of the first line visible in the editor.
     func visibleStartOffset() -> Int
     /// Paints the sentence and the word (nil clears that one) and scrolls
@@ -68,6 +72,11 @@ final class TextViewReadAloudSurface: ReadAloudEditorSurface {
             return NSRange(location: 0, length: 0)
         }
         return NSRange(location: min(range.location, length), length: range.length)
+    }
+
+    var isFocused: Bool {
+        guard let textView, let window = textView.window else { return false }
+        return window.firstResponder === textView
     }
 
     func visibleStartOffset() -> Int {

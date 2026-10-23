@@ -39,6 +39,27 @@ final class ReadAloudHotkeyAppTests: XCTestCase {
 
     // MARK: Editor surface
 
+    /// The caret only counts while the editor is its window's first
+    /// responder (Edit view after focus moved elsewhere: SwiftUI leaves the
+    /// caret at the end of the text).
+    func testSurfaceReportsWhetherTheEditorHasFocus() {
+        let textView = makeEditor("Hello world. Second one.")
+        let surface = TextViewReadAloudSurface(textView: textView)
+        window?.makeFirstResponder(nil)
+        XCTAssertFalse(surface.isFocused)
+        window?.makeFirstResponder(textView)
+        XCTAssertTrue(surface.isFocused)
+        textView.setSelectedRange(NSRange(location: 6, length: 0))
+        XCTAssertEqual(ReadAloudController.editorStartOffset(
+            text: surface.text, selection: surface.selectedRange, focused: surface.isFocused,
+            prefer: .selection, visibleStart: surface.visibleStartOffset()), 6)
+        window?.makeFirstResponder(nil)
+        XCTAssertEqual(ReadAloudController.editorStartOffset(
+            text: surface.text, selection: surface.selectedRange, focused: surface.isFocused,
+            prefer: .selection, visibleStart: surface.visibleStartOffset()), 0,
+            "unfocused: the first visible line, not the caret")
+    }
+
     func testPaintsTemporaryAttributesWithoutTouchingTheDocument() {
         let textView = makeEditor("Hello world. Second one.")
         let surface = TextViewReadAloudSurface(textView: textView)

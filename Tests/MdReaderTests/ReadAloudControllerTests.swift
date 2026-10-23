@@ -213,6 +213,7 @@ private final class FakeEditor: ReadAloudEditorSurface {
     let text: String
     var selectedRange: NSRange
     var visibleStart = 0
+    var isFocused = true
     var onInvalidate: (() -> Void)?
     var paints: [Paint] = []
     var clears = 0
@@ -743,6 +744,57 @@ final class ReadAloudControllerTests: XCTestCase {
         controller.hotkeySource = { .editor(FakeEditor(text: " \n\n ")) }
         controller.handleReadRequest(hotkey())
         await expectDecline(.noContent, "emptyEditor")
+    }
+
+    /// The bug from live QA: Edit view, editor not focused, SwiftUI's caret
+    /// at the very end → the read started at the end and spoke 0 words.
+    func testHotkeyUnfocusedEditorIgnoresItsCaretAtTheEnd() async {
+        let text = "First line here.\nSecond line here."
+        let editor = FakeEditor(text: text, selection: NSRange(location: (text as NSString).length, length: 0))
+        editor.isFocused = false
+        editor.visibleStart = 0
+        controller.hotkeySource = { .editor(editor) }
+        controller.handleReadRequest(hotkey())
+        await eventually { backend.requests.count == 1 }
+        XCTAssertEqual(backend.requests[0].startOffset, 0, "start at the first visible line, not the stale caret")
+    }
+
+    func testHotkeyFocusedCaretAtTheEndDeclinesNoContent() async {
+        let text = "Everything was read already.  \n"
+        let editor = FakeEditor(text: text, selection: NSRange(location: (text as NSString).length, length: 0))
+        controller.hotkeySource = { .editor(editor) }
+        controller.handleReadRequest(hotkey())
+        await expectDecline(.noContent, "nothingAfterCursor")
+        XCTAssertTrue(backend.requests.isEmpty, "never an empty read")
+    }
+
+    func testHotkeySelectionWinsEvenWhenTheEditorIsNotFocused() async {
+        let text = "Alpha beta. Gamma delta."
+        let editor = FakeEditor(text: text, selection: NSRange(location: 12, length: 5))
+        editor.isFocused = false
+        editor.visibleStart = 0
+        controller.hotkeySource = { .editor(editor) }
+        controller.handleReadRequest(hotkey())
+        await eventually { backend.requests.count == 1 }
+        XCTAssertEqual(backend.requests[0].startOffset, 12)
+    }
+
+    func testEditorStartOffsetRules() {
+        let text = "One two. Three four.\n\n"           // 20 readable units, then blank lines
+        func start(_ sel: NSRange, focused: Bool, prefer: UnivocalReadRequest.Preference = .selection,
+                   visible: Int = 4) -> Int? {
+            ReadAloudController.editorStartOffset(text: text, selection: sel, focused: focused,
+                                                  prefer: prefer, visibleStart: visible)
+        }
+        XCTAssertEqual(start(NSRange(location: 9, length: 5), focused: false), 9, "selection wins")
+        XCTAssertEqual(start(NSRange(location: 9, length: 0), focused: true), 9, "focused caret")
+        XCTAssertEqual(start(NSRange(location: 9, length: 0), focused: false), 4, "unfocused caret → visible line")
+        XCTAssertEqual(start(NSRange(location: 9, length: 5), focused: true, prefer: .document), 4)
+        XCTAssertNil(start(NSRange(location: 20, length: 0), focused: true), "only blank lines follow")
+        XCTAssertNil(start(NSRange(location: 22, length: 0), focused: true), "caret at the very end")
+        XCTAssertNil(start(NSRange(location: 19, length: 0), focused: true), "only the full stop follows")
+        XCTAssertEqual(start(NSRange(location: 999, length: 0), focused: false, visible: 999), nil, "clamped, then nothing")
+        XCTAssertEqual(start(NSRange(location: NSNotFound, length: 0), focused: true, visible: 0), 0)
     }
 
     // MARK: Connection at launch, wake

@@ -331,10 +331,11 @@ final class ReadAloudController: ObservableObject {
         let text = surface.text
         guard text.contains(where: { !$0.isWhitespace }) else { return decline(request, .noContent, "emptyEditor") }
         guard text.utf8.count <= Self.maxTextBytes else { return decline(request, .other, "tooLarge") }
+        guard let startOffset = Self.editorStartOffset(
+            text: text, selection: surface.selectedRange, focused: surface.isFocused,
+            prefer: request.prefer, visibleStart: surface.visibleStartOffset())
+        else { return decline(request, .noContent, "nothingAfterCursor") }
         endSession()
-        let startOffset = request.prefer == .selection
-            ? surface.selectedRange.location
-            : surface.visibleStartOffset()
         editor = surface
         hotkeyRequest = request
         let token = sessionToken
@@ -344,7 +345,32 @@ final class ReadAloudController: ObservableObject {
             self.stop()
         }
         status = .starting(nil)
-        begin(text: text, startOffset: min(startOffset, text.utf16.count), generation: nil, replacing: nil)
+        begin(text: text, startOffset: startOffset, generation: nil, replacing: nil)
+    }
+
+    /// Where a hotkey read of the editor starts (a UTF-16 offset into
+    /// `text`), or nil when nothing readable follows it (→ `noContent`).
+    /// A selection wins; else the caret, but only while the editor has
+    /// focus; else — and for `prefer: document` — the first visible line.
+    static func editorStartOffset(text: String, selection: NSRange, focused: Bool,
+                                  prefer: UnivocalReadRequest.Preference, visibleStart: Int) -> Int? {
+        let ns = text as NSString
+        var start: Int
+        switch prefer {
+        case .document:
+            start = visibleStart
+        case .selection:
+            if selection.location != NSNotFound, selection.length > 0 {
+                start = selection.location
+            } else if focused, selection.location != NSNotFound {
+                start = selection.location
+            } else {
+                start = visibleStart
+            }
+        }
+        start = max(0, min(start, ns.length))
+        let rest = ns.substring(from: start)
+        return rest.contains(where: { !$0.isWhitespace && !$0.isPunctuation }) ? start : nil
     }
 
     /// Gives up on a hotkey request: Univocal reads in its panel instead.
