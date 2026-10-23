@@ -13,6 +13,12 @@ let package = Package(
         .executable(name: "PreviewMD", targets: ["MdReader"]),
         .executable(name: "PreviewMD-QL", targets: ["MdReaderQL"]),
         .library(name: "MdReaderCore", targets: ["MdReaderCore"]),
+        // Univocal Connect: Swift SDK, conformant mock server, and its CLI.
+        // `Sources/UnivocalClient` has no PreviewMD dependencies and is meant to
+        // be extracted into its own package (see its README).
+        .library(name: "UnivocalClient", targets: ["UnivocalClient"]),
+        .library(name: "UnivocalMock", targets: ["UnivocalMock"]),
+        .executable(name: "univocal-mock", targets: ["UnivocalMockCLI"]),
     ],
     targets: [
         .target(
@@ -22,7 +28,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "MdReader",
-            dependencies: ["MdReaderCore"],
+            dependencies: ["MdReaderCore", "UnivocalClient"],
             path: "Sources/MdReader"
         ),
         .executableTarget(
@@ -34,6 +40,34 @@ let package = Package(
             name: "MdReaderCoreTests",
             dependencies: ["MdReaderCore"],
             path: "Tests/MdReaderCoreTests"
+        ),
+        .target(
+            name: "UnivocalClient",
+            path: "Sources/UnivocalClient",
+            exclude: ["README.md"],
+            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
+        ),
+        .target(
+            name: "UnivocalMock",
+            dependencies: ["UnivocalClient"],
+            path: "Sources/UnivocalMock",
+            swiftSettings: [.enableUpcomingFeature("StrictConcurrency")]
+        ),
+        .executableTarget(
+            name: "UnivocalMockCLI",
+            dependencies: ["UnivocalMock", "UnivocalClient"],
+            path: "Sources/UnivocalMockCLI"
+        ),
+        .testTarget(
+            name: "UnivocalClientTests",
+            dependencies: ["UnivocalClient", "UnivocalMock"],
+            path: "Tests/UnivocalClientTests"
+        ),
+        // Read Aloud controller tests (app target, fake backend).
+        .testTarget(
+            name: "MdReaderTests",
+            dependencies: ["MdReader", "UnivocalClient", "UnivocalMock"],
+            path: "Tests/MdReaderTests"
         ),
     ]
 )

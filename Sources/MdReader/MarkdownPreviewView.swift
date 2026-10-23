@@ -33,6 +33,9 @@ struct MarkdownPreviewView: NSViewRepresentable {
     /// showing a placeholder): a pending wikilink `#heading` scroll waits for
     /// the real content.
     var isContentReady: Bool = true
+    /// Messages from read-aloud.js (`ReadAloudBridge`), with the web view
+    /// that posted them.
+    var onReadAloudMessage: ((ReadAloudBridge.Message, WKWebView?) -> Void)?
     @AppStorage(PreviewSettings.zoomKey) private var zoom: Double = PreviewSettings.defaultZoom
 
     init(
@@ -47,7 +50,8 @@ struct MarkdownPreviewView: NSViewRepresentable {
         wikiLinkIndex: WikiLinkIndex? = nil,
         wikiLinkIndexVersion: Int = 0,
         onOpenWikiLink: ((URL) -> Bool)? = nil,
-        isContentReady: Bool = true
+        isContentReady: Bool = true,
+        onReadAloudMessage: ((ReadAloudBridge.Message, WKWebView?) -> Void)? = nil
     ) {
         self.markdownText = markdownText
         self.onRenderComplete = onRenderComplete
@@ -61,9 +65,13 @@ struct MarkdownPreviewView: NSViewRepresentable {
         self.wikiLinkIndexVersion = wikiLinkIndexVersion
         self.onOpenWikiLink = onOpenWikiLink
         self.isContentReady = isContentReady
+        self.onReadAloudMessage = onReadAloudMessage
     }
 
-    private static let messageNames = ["tocUpdate", "loadRemoteImages", "openLocalFile", "openWikiLink"]
+    private static let messageNames = [
+        "tocUpdate", "loadRemoteImages", "openLocalFile", "openWikiLink",
+        ReadAloudBridge.messageHandlerName,
+    ]
 
     func makeNSView(context: Context) -> WKWebView {
         let coordinator = context.coordinator
@@ -95,6 +103,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         coordinator.onWebViewReady = onWebViewReady
         coordinator.onOpenLocalFile = onOpenLocalFile
         coordinator.onOpenWikiLink = onOpenWikiLink
+        coordinator.onReadAloudMessage = onReadAloudMessage
         coordinator.setDocument(documentURL, workspaceRoot: workspaceRoot)
         coordinator.setWikiLinkIndex(wikiLinkIndex, version: wikiLinkIndexVersion)
         coordinator.isContentReady = isContentReady
@@ -114,6 +123,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         coordinator.onWebViewReady = onWebViewReady
         coordinator.onOpenLocalFile = onOpenLocalFile
         coordinator.onOpenWikiLink = onOpenWikiLink
+        coordinator.onReadAloudMessage = onReadAloudMessage
         coordinator.setDocument(documentURL, workspaceRoot: workspaceRoot)
         coordinator.setWikiLinkIndex(wikiLinkIndex, version: wikiLinkIndexVersion)
         coordinator.isContentReady = isContentReady
@@ -139,6 +149,7 @@ struct MarkdownPreviewView: NSViewRepresentable {
         var onWebViewReady: ((WKWebView?) -> Void)?
         var onOpenLocalFile: ((URL) -> Void)?
         var onOpenWikiLink: ((URL) -> Bool)?
+        var onReadAloudMessage: ((ReadAloudBridge.Message, WKWebView?) -> Void)?
         var isContentReady = true
         let imageHandler = LocalImageSchemeHandler()
         /// The inputs of a render, compared cheaply to skip redundant ones
@@ -419,6 +430,9 @@ struct MarkdownPreviewView: NSViewRepresentable {
                     scrollTracker.shellWillReload(document: documentURL, scrollY: scrollY)
                     loadShell()
                 }
+            case ReadAloudBridge.messageHandlerName:
+                guard let parsed = ReadAloudBridge.parseMessage(message.body) else { return }
+                onReadAloudMessage?(parsed, message.webView)
             default:
                 break
             }

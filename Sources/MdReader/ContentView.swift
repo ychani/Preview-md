@@ -105,6 +105,11 @@ struct ContentView: View {
         }
 
         ToolbarItem(placement: .primaryAction) {
+            ReadAloudToolbarControls(readAloud: appState.readAloud,
+                                     isDocumentReady: appState.canReadAloud)
+        }
+
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 appState.showTOC.toggle()
             } label: {
@@ -234,7 +239,10 @@ private struct PreviewPane: View {
                 wikiLinkIndex: appState.wikiLinkIndex,
                 wikiLinkIndexVersion: appState.wikiLinkIndexVersion,
                 onOpenWikiLink: { url in appState.openLinkedFile(url) },
-                isContentReady: !appState.isReadingFile
+                isContentReady: !appState.isReadingFile,
+                onReadAloudMessage: { message, webView in
+                    appState.readAloud.handle(message, from: webView)
+                }
             )
             if appState.isLoading {
                 Color(nsColor: .textBackgroundColor)

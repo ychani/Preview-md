@@ -45,6 +45,7 @@ Sources/
   MdReaderCore/               shared library
     MarkdownDocumentIO.swift      encoding-, BOM- and line-ending-aware reading/writing
     MarkdownRenderBridge.swift    safe JS call builder for the WebView, CSP, local image/link resolution
+    ReadAloudBridge.swift         Read Aloud: JS calls and page messages (read-aloud.js contract)
     MarkdownHTMLRenderer.swift    static HTML rendering via JavaScriptCore (Quick Look)
     LocalImageInliner.swift       inlines local images into Quick Look previews (same path policy)
     FileWatcher.swift             watches the open file (survives atomic saves)
@@ -57,17 +58,19 @@ Sources/
     WikiLink.swift                wikilink parsing and workspace-wide resolution
     MdReaderCore.swift            resource-bundle lookup
     Resources/                    marked, DOMPurify, Mermaid, markdown-extensions.js (front matter,
-                                  wikilinks), preview.html/.js/.css, third-party notices
+                                  wikilinks), preview.html/.js/.css, read-aloud(-core).js, third-party notices
   MdReader/                   the app (SwiftUI + WKWebView)
     AppState.swift                documents, workspace, watchers, wikilink index
     SidebarView.swift             folder tree and opened-files list
     MarkdownPreviewView.swift     preview WebView
     LocalImageSchemeHandler.swift serves local images to the preview (previewmd-local: scheme)
     FileLocationActions.swift     Reveal in Finder / Copy Path / Copy Relative Path
+    ReadAloud/                    Read Aloud controller, toolbar/menu, Univocal SDK adapter
     PreviewSettings.swift         preview and editor zoom
     …                             editor, find bar, TOC, menus
   MdReaderQL/                 Quick Look extension (QLPreviewingController)
 Tests/MdReaderCoreTests/      unit tests
+Tests/MdReaderTests/          app-target tests (Read Aloud controller)
 packaging/                    Info.plists, Quick Look entitlements, app icon, Homebrew cask
 Makefile                      app bundle, signing, notarization, DMG, release
 ```

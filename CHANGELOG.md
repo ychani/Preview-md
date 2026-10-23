@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 
 ## [Unreleased]
 
+### Added
+- **Read Aloud** with word-by-word highlighting through
+  [Univocal](https://univocalapp.com) (Univocal Connect protocol): the toolbar
+  button or Edit ▸ Read Aloud (⇧⌘R) reads the preview, highlights the current
+  word and sentence, and follows them as they scroll out of view (a manual
+  scroll pauses following for a few seconds). Click a word while reading to
+  jump there. Univocal's floating controls pause, skip sentences, change
+  speed or voice, and stop; PreviewMD has no pause or stop of its own — while
+  it reads, the toolbar button shows a reading state and ⇧⌘R does nothing. Code blocks, diagrams, images and front
+  matter are skipped. Edits in Split view (or a reload from disk) restart
+  reading at the current sentence; switching documents or to Edit view
+  stops it. Univocal asks once for permission; without Univocal installed
+  the button links to its download page.
+- **Univocal's ⌥⇧R reads in PreviewMD** (Univocal Connect hotkey routing):
+  with PreviewMD in front, Univocal's own read shortcut reads the open
+  document here, with the same highlighting, instead of in Univocal's panel.
+  In the preview it starts at the selection, else at the first block fully
+  on screen; in the editor (Edit view, or Split view with the editor
+  focused) it reads the Markdown source from the selection or the caret,
+  highlights it in the editor, and stops when you type. Press it again to
+  pause or resume. Once allowed, PreviewMD connects quietly whenever
+  Univocal is running; it never starts Univocal or asks for permission on
+  its own. Registers the `previewmd://` URL scheme, which Univocal uses only
+  to wake PreviewMD — it never opens or raises a window.
+
 ## [0.4.0] — 2026-10-21
 
 First public release. Version 0.3.0 was never published; its changes ship here too.

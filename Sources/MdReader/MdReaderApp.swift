@@ -1,11 +1,12 @@
 import AppKit
 import MdReaderCore
 import SwiftUI
+import UnivocalClient
 
 @main
 struct MdReaderApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState.shared
 
     private func recentLabel(for url: URL) -> String {
         let name = url.lastPathComponent
@@ -46,7 +47,9 @@ struct MdReaderApp: App {
                 // instead), so route every URL through the delegate's
                 // coalescer rather than opening each one on its own.
                 .onOpenURL { url in
-                    appDelegate.enqueueOpen([url])
+                    // Scheme URLs normally never get here (the delegate's
+                    // GURL handler takes them first); route them anyway.
+                    appDelegate.route([url])
                 }
                 // All windows share one AppState, so route Finder / `open -a`
                 // opens to the existing window instead of letting WindowGroup
@@ -132,6 +135,12 @@ struct MdReaderApp: App {
                 }
                 .keyboardShortcut("f", modifiers: .command)
                 .disabled(appState.selectedFile == nil)
+
+                // ⇧⌘R starts reading (⌥⌘R is Reveal in Finder).
+                Menu("Read Aloud") {
+                    ReadAloudCommands(readAloud: appState.readAloud,
+                                      isDocumentReady: appState.canReadAloud)
+                }
             }
             CommandGroup(after: .toolbar) {
                 Button("Preview") { appState.viewMode = .preview }
@@ -166,15 +175,25 @@ struct MdReaderApp: App {
 ///
 /// Opens can arrive before the SwiftUI scene has wired `appState` in via
 /// `onAppear`; the batch stays pending until the reference lands.
+///
+/// Univocal's wake URL (`previewmd://univocal-connect/read?requestId=…`,
+/// SPEC §16.5) arrives as a GURL Apple Event. A handler installed in
+/// `applicationWillFinishLaunching` takes those events before SwiftUI sees
+/// them: SwiftUI's `WindowGroup` would otherwise route the URL to a window
+/// (bringing it forward) or, with no window open, create one — the wake must
+/// not open, raise or activate anything. File opens ('odoc') are untouched.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// How long to keep collecting after the first URL of a burst. Long
     /// enough to span SwiftUI's per-URL callbacks, short enough to be
     /// imperceptible on a single open.
     private static let coalesceWindow: TimeInterval = 0.15
 
-    private var pendingURLs: [URL] = []
+    private(set) var pendingURLs: [URL] = []
     private var flushScheduled = false
     private var _appState: AppState?
+
+    /// Where wake request ids go; tests replace it.
+    var wakeHandler: ((String) -> Void)?
 
     var appState: AppState? {
         get { _appState }
@@ -184,8 +203,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(handleGetURL(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+    }
+
+    /// GURL events: `open previewmd://…`, LaunchServices for the
+    /// `previewmd` scheme.
+    @objc func handleGetURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: string) else { return }
+        route([url])
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
-        enqueueOpen(urls)
+        route(urls)
+    }
+
+    /// Wake URLs go to Read Aloud; file URLs to the open coalescer; any
+    /// other URL (an unknown `previewmd://` link) is ignored.
+    func route(_ urls: [URL]) {
+        var files: [URL] = []
+        for url in urls {
+            if url.isFileURL {
+                files.append(url)
+            } else if let requestId = UnivocalWakeURL.parse(url) {
+                deliverWake(requestId)
+            }
+        }
+        if !files.isEmpty { enqueueOpen(files) }
+    }
+
+    private func deliverWake(_ requestId: String) {
+        if let wakeHandler {
+            wakeHandler(requestId)
+        } else {
+            // Not `_appState`: that arrives with the first window's
+            // `onAppear`, and PreviewMD can be frontmost with no window open.
+            // A wake needs only Read Aloud, which lives as long as the app.
+            MainActor.assumeIsolated { AppState.shared.readAloud.handleWakeURL(requestId: requestId) }
+        }
     }
 
     /// Adds URLs to the pending batch (deduped by standardized file URL) and
