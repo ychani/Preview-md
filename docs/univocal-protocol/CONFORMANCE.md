@@ -118,6 +118,7 @@ harness) — replacing the Probe column, which does not apply to clients.
 | C22 | Connect-at-launch: connects with `hello{quiet:true}` only when a token exists and the discovery file shows a live server; never launches the server; never prompts at launch; on `consentDenied{quiet}` discards the token; reconnects when the server appears. | 16.9 | ✓ | ✓ (`connectIfAuthorized`, `serverAppearances`) | ✓ (controller: launch with/without token; no `launcher` call) |
 | C23 | Toggle is server-side: the client applies `state{paused}`/`state{playing}` from the hotkey like any other state change (no local toggling on the wake URL or request). | 16.7 | ✓ | ✓ | ✓ |
 | C24 | Hotkey routing adds nothing to Quick Look or other extension targets of the same bundle (PreviewMD: `MdReaderQL` unchanged). | — | — | — | ✓ (build + resources test) |
+| C25 | Never blocks `hello` on token storage: a token read that does not complete within a short timeout (Keychain prompt, error, denial) means `hello` without a token; token writes are not awaited on the handshake path. Tokens for a non-default connect directory are kept apart from the real server's. | 5.3, 9.1 | — | ✓ (`TokenReadTimeoutTests`) | manual (ad-hoc rebuild) |
 
 ## C. How to run
 

@@ -18,7 +18,7 @@ final class HandshakeTests: UnivocalTestCase {
         let info = try await client.connect(launchIfNeeded: false)
 
         XCTAssertEqual(info.name, "Univocal Mock")
-        XCTAssertEqual(info.bundleId, "com.univocal.app")
+        XCTAssertEqual(info.bundleId, "com.univocal.mock")
         XCTAssertEqual(info.protocolVersion, 1)
         XCTAssertEqual(info.transport, .unixSocket)
         XCTAssertEqual(info.grantIdentity, "unverified:com.example.tests")

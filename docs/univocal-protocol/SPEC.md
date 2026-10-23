@@ -246,8 +246,12 @@ followed by the server closing the connection. `reason:"quiet"` is only sent in
 answer to `hello{quiet:true}` (§16.9): no prompt was shown; the client SHOULD
 discard the token it presented (it is no longer valid) and MUST NOT retry
 without a user action. The client MUST store a granted
-token securely (Keychain on macOS) keyed by the server's `bundleId`, and present
-it in future `hello`s. A token that is unknown or revoked yields
+token securely (Keychain on macOS) keyed by the server's `bundleId` — plus the
+connect directory when it is not that server's default, so a test or mock
+server never shares the real server's token — and present it in future
+`hello`s. Reading the token MUST NOT hold up the handshake: a client that
+cannot get it promptly (a Keychain prompt, an error) sends `hello` without a
+token and lets the server ask for consent again. A token that is unknown or revoked yields
 `consentPending` again (the server re-prompts), unless the grant was revoked
 less than 10 minutes ago, in which case the server MUST reply
 `error{code:"unauthorized", reason:"revoked"}` (fatal) instead, so a client
@@ -552,7 +556,12 @@ across all connections and Univocal's own hotkey reading.
 ### 9.1 Native macOS, not sandboxed (e.g. PreviewMD)
 Unix socket via Network.framework (`NWEndpoint.unix(path:)`) or POSIX. Token in
 Keychain (`kSecClassGenericPassword`, service `com.univocal.connect`, account =
-server bundle id).
+server bundle id, or `<bundle id>@<connect dir>` for a non-default connect
+directory). macOS guards an item with the code signature that wrote it, so an
+ad-hoc or dev build reading a token saved by a previous build triggers a
+Keychain prompt; read it off the main path with a short timeout (the Swift SDK
+waits 1 s) and fall back to no token. Developer ID builds keep a stable
+designated requirement and are not prompted.
 
 ### 9.2 Native macOS, sandboxed
 Use the WebSocket transport (needs only `com.apple.security.network.client`).

@@ -57,6 +57,23 @@ public struct UnivocalConfiguration: Sendable {
     /// `hello.capabilities` itself — do not insert "hotkey-target" into `clientCapabilities`.
     public var hotkeyTarget: Bool
     public var tokenStore: any UnivocalTokenStore
+    /// How long the handshake waits for the stored token. A Keychain read can
+    /// block on a macOS prompt ("… wants to use your confidential
+    /// information …", e.g. after a differently signed ad-hoc build saved
+    /// the token); after this the client says `hello` without a token and
+    /// Univocal asks for consent again. Default 1 s.
+    public var tokenReadTimeout: Duration = .seconds(1)
+
+    /// The token store key: the server's bundle id, plus the connect
+    /// directory when it is not that server's default — so a mock or test
+    /// server (`UNIVOCAL_CONNECT_DIR`) never shares a token with the real
+    /// Univocal.
+    public var tokenAccount: String {
+        let standard = Self.resolveConnectDirectory(serverBundleId: serverBundleId, environment: [:])
+        let dir = connectDirectory.standardizedFileURL
+        return dir.path == standard.path ? serverBundleId : "\(serverBundleId)@\(dir.path)"
+    }
+
     /// Diagnostics hook. Receives ids, lengths, codes and durations — never text content.
     public var logger: (@Sendable (String) -> Void)?
 

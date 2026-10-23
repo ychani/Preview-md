@@ -337,7 +337,7 @@ final class HotkeyRoutingTests: UnivocalTestCase {
         let client = makeTarget()
         let requests = Recorder.start(client.readRequests())
         _ = try await client.connect()
-        await mock.setFrontmost(MockFrontmost(pid: getpid(), bundleId: "com.univocal.app"))
+        await mock.setFrontmost(MockFrontmost(pid: getpid(), bundleId: "com.univocal.mock"))
         let outcome = await mock.simulateHotkey()
         XCTAssertEqual(outcome, .selfHandled)
         let items = await requests.items

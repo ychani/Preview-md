@@ -9,7 +9,7 @@ import UnivocalMock
 
 final class ConsentTests: UnivocalTestCase {
 
-    private let server = "com.univocal.app"
+    private var server: String { tokenKey }
 
     // MARK: Grant / deny / timeout (S12, C5)
 

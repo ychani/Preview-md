@@ -147,6 +147,14 @@ class UnivocalTestCase: XCTestCase {
         return s
     }
 
+    /// The token store key a client in `dir` uses (`UnivocalConfiguration.tokenAccount`):
+    /// the server bundle id plus this test's connect directory.
+    var tokenKey: String {
+        var c = UnivocalConfiguration(client: .init(id: "k", name: "k", version: "1"), environment: [:])
+        c.connectDirectory = dir
+        return c.tokenAccount
+    }
+
     func makeClient(id: String = "com.example.tests", name: String = "Tests",
                     store: InMemoryTokenStore? = nil, directory: URL? = nil,
                     _ configure: (inout UnivocalConfiguration) -> Void = { _ in }) -> UnivocalClient {

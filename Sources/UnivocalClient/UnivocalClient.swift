@@ -69,6 +69,9 @@ public actor UnivocalClient {
     private var connectTask: Task<UnivocalServerInfo, Error>?
     /// Set on `unauthorized{revoked}`: connect() refuses to re-prompt until then (SPEC §5.3).
     private var revokedUntil: Date?
+    /// Token writes and deletes, chained so they land in order; never awaited
+    /// on the handshake path (a Keychain write can sit behind a prompt too).
+    private var tokenWrites: Task<Void, Never>?
 
     /// SDK chunk size (UTF-8 bytes) for long texts (SPEC §8).
     static let chunkUTF8Bytes = 512 * 1024
@@ -134,8 +137,59 @@ public actor UnivocalClient {
     public func forgetAuthorization() async throws {
         revokedUntil = nil
         await disconnect()
-        try await configuration.tokenStore.setToken(nil, forServer: configuration.serverBundleId)
+        await tokenWrites?.value
+        try await configuration.tokenStore.setToken(nil, forServer: configuration.tokenAccount)
         log("token forgotten")
+    }
+
+    // MARK: Token storage, off the critical path
+
+    /// The stored token, or nil after `tokenReadTimeout`: a Keychain read can
+    /// wait on a macOS prompt, and the handshake must not. The read keeps
+    /// running in the background; its late result is dropped.
+    private func storedToken() async -> String? {
+        let store = configuration.tokenStore
+        let account = configuration.tokenAccount
+        let timeout = configuration.tokenReadTimeout
+        let started = ContinuousClock.now
+        // Unstructured on purpose: a blocked Keychain call ignores
+        // cancellation, and a task group would wait for it before returning.
+        let read = Task.detached { () -> String? in try? await store.token(forServer: account) }
+        let result: String?? = await withCheckedContinuation { cont in
+            let once = ResumeOnce()
+            Task.detached {
+                let token = await read.value
+                if once.claim() { cont.resume(returning: .some(token)) }
+            }
+            Task.detached {
+                try? await Task.sleep(for: timeout)
+                if once.claim() { cont.resume(returning: .none) }
+            }
+        }
+        switch result {
+        case .none:
+            log("token store read timed out after \(timeout); hello without a token")
+            return nil
+        case .some(let token):
+            log("token store read \(token == nil ? "empty" : "ok") in \(ContinuousClock.now - started)")
+            return token
+        }
+    }
+
+    /// Saves (or with nil, deletes) the token without blocking the caller.
+    private func persistToken(_ token: String?) {
+        let store = configuration.tokenStore
+        let account = configuration.tokenAccount
+        let previous = tokenWrites
+        let logger = configuration.logger
+        tokenWrites = Task.detached {
+            await previous?.value
+            do {
+                try await store.setToken(token, forServer: account)
+            } catch {
+                logger?("token store \(token == nil ? "delete" : "write") failed")
+            }
+        }
     }
 
     // MARK: Sessions
@@ -333,13 +387,7 @@ public actor UnivocalClient {
             log("connect-at-launch skipped: revoked recently")
             return nil
         }
-        let token: String?
-        do {
-            token = try await configuration.tokenStore.token(forServer: configuration.serverBundleId)
-        } catch {
-            log("token store read failed")
-            token = nil
-        }
+        let token = await storedToken()
         guard token != nil else {
             log("connect-at-launch skipped: no stored token")
             return nil
@@ -520,13 +568,7 @@ public actor UnivocalClient {
             }
         }
 
-        let token: String?
-        do {
-            token = try await configuration.tokenStore.token(forServer: configuration.serverBundleId)
-        } catch {
-            log("token store read failed")
-            token = nil
-        }
+        let token = await storedToken()
         guard self.link === link, !link.tornDown else { throw UnivocalError.disconnected() }
 
         let c = configuration.client
@@ -594,22 +636,14 @@ public actor UnivocalClient {
         case "consentGranted":
             log("consent granted")
             if let token = msg.string("token") {
-                do {
-                    try await configuration.tokenStore.setToken(token, forServer: configuration.serverBundleId)
-                } catch {
-                    log("token store write failed")
-                }
+                persistToken(token)
             }
         case "consentDenied":
             let reason = msg.string("reason") ?? "user"
             log("consent denied reason=\(reason)")
             if reason == "quiet" {
                 // SPEC §5.3: the presented token is no longer valid; never retry without a user action.
-                do {
-                    try await configuration.tokenStore.setToken(nil, forServer: configuration.serverBundleId)
-                } catch {
-                    log("token store delete failed")
-                }
+                persistToken(nil)
             }
             let err = UnivocalError(code: .consentDenied, message: Self.denialMessage(reason), fatal: true, reason: reason)
             link.fatalError = err
@@ -677,11 +711,7 @@ public actor UnivocalClient {
         log("server error code=\(err.code.rawValue) fatal=\(err.fatal) reason=\(err.reason ?? "-")")
         if err.code == .unauthorized, err.reason == "revoked" {
             revokedUntil = Date().addingTimeInterval(Self.revocationHold)
-            do {
-                try await configuration.tokenStore.setToken(nil, forServer: configuration.serverBundleId)
-            } catch {
-                log("token store delete failed")
-            }
+            persistToken(nil)
         }
         if err.fatal { link.fatalError = err }
         if let id = msg.int("id"), let cont = link.pending.removeValue(forKey: id) {
@@ -930,5 +960,17 @@ enum TextChunker {
             return s.unicodeScalars.index(after: s.startIndex)
         }
         return limit
+    }
+}
+
+/// Lets exactly one of several racers resume a continuation.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if claimed { return false }
+        claimed = true
+        return true
     }
 }

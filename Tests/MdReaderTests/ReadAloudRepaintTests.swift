@@ -224,6 +224,11 @@ final class ReadAloudRepaintTests: XCTestCase {
                                                           [.boundsIgnoreFraming, .bestResolution]),
                                   "no window image (Screen Recording permission?)")
         let scale = Double(image.width) / Double(window.frame.width)
+        // A window on an inactive Space (or with the display asleep) is not
+        // composited: the capture is blank, and there is nothing to judge.
+        guard inkPixels(image) > 0 else {
+            throw XCTSkip("the test window was not composited (another Space or display asleep)")
+        }
         XCTAssertGreaterThan(tintedPixels(image, box: boxes[3], scale: scale), 0,
                              "the current sentence shows no highlight: capture not working?")
         for (i, what) in ["the heading", "the paragraph", "the table"].enumerated() {
@@ -235,6 +240,21 @@ final class ReadAloudRepaintTests: XCTestCase {
             try rep.representation(using: .png, properties: [:])?
                 .write(to: URL(fileURLWithPath: out).appendingPathComponent("pixels.png"))
         }
+    }
+
+    /// Dark (text) pixels anywhere in the image.
+    private func inkPixels(_ image: CGImage) -> Int {
+        let w = image.width, h = image.height
+        var data = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &data, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 0 }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var count = 0
+        for i in stride(from: 0, to: data.count, by: 4) where data[i] < 80 && data[i + 1] < 80 && data[i + 2] < 80 {
+            count += 1
+        }
+        return count
     }
 
     /// Pixels inside `box` (CSS px from the page's top-left) tinted like the

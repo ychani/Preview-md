@@ -50,7 +50,9 @@ public struct MockBehaviour: Sendable {
     public var rateRange: ClosedRange<Double> = 0.25...4.0
     public var serverName = "Univocal Mock"
     public var serverVersion = "1.0.0"
-    public var serverBundleId = "com.univocal.app"
+    /// Its own id, never the real server's (`com.univocal.app`): what QA sees in
+    /// `welcome`, `connect.json` and the "Univocal is frontmost" check (`frontmost self`).
+    public var serverBundleId = "com.univocal.mock"
     /// Receives every log line (and consent prompts). Default: stderr when `verbose`, else nothing.
     public var logHandler: (@Sendable (String) -> Void)?
 

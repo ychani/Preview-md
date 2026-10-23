@@ -258,7 +258,7 @@ final class WakeTests: UnivocalTestCase {
 // MARK: - Connect at launch (S50, C22)
 
 final class ConnectAtLaunchTests: UnivocalTestCase {
-    private let serverId = "com.univocal.app"
+    private var serverId: String { tokenKey }
     private let seeded = "uc1_seededseededseededseededseededseededseede"
 
     func testNoTokenMeansNoConnection() async throws {

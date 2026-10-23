@@ -88,8 +88,27 @@ Callers see one session with global offsets.
 ### Tokens
 
 `KeychainTokenStore` (default) keeps the grant token in the login Keychain:
-`kSecClassGenericPassword`, service `com.univocal.connect`, account = Univocal's
-bundle id. `InMemoryTokenStore` is for tests, previews and CLIs.
+`kSecClassGenericPassword`, service `com.univocal.connect`, account =
+`configuration.tokenAccount` — Univocal's bundle id, plus `@<connect dir>` when
+the connect directory is not that server's default. A mock or a test server
+(`UNIVOCAL_CONNECT_DIR`) therefore never reads or overwrites the token for the
+real Univocal; QA tokens land under accounts like `com.univocal.app@/tmp/uc-qa`
+and can be removed with
+`security delete-generic-password -s com.univocal.connect -a 'com.univocal.app@/tmp/uc-qa'`.
+`InMemoryTokenStore` is for tests, previews and CLIs; tests never use the
+Keychain store (the opt-in Keychain round-trip test uses a throwaway service).
+
+**The Keychain never holds up the handshake.** macOS ties a Keychain item to
+the code signature of the app that wrote it. Ad-hoc and dev builds get a new
+designated requirement with every build, so reading a token a *previous*
+build saved makes macOS ask: "<App> wants to use your confidential
+information stored in 'Univocal Connect token (…)'", with a password field.
+The read blocks until the user answers. So the client reads the token on a
+background queue and waits at most `tokenReadTimeout` (default 1 s); after
+that, or on any error or denial, it says `hello` without a token and Univocal
+asks for consent again. Writes and deletes are never awaited on the handshake
+path. Builds signed with a Developer ID (or App Store) certificate keep a
+stable designated requirement across updates and never see this prompt.
 
 ### Environment (QA only — never set in a shipped app)
 
